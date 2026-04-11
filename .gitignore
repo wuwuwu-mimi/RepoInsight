@@ -33,8 +33,7 @@ Thumbs.db
 clone/
 data/
 reports/
-RepoInsight-MVP-PRD.md
-RepoInsight.md
+docs/
 # 临时文件
 *.log
 *.tmp

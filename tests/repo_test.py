@@ -1,84 +1,25 @@
-"""clone repo"""
-import asyncio
 import os
-from rich import print
 
-from repoinsight.utils.check_util import check_url
+# 你的根目录
+root_path = "./"  # 改成你要遍历的路径
 
-from dotenv import load_dotenv
+# 定义三个空列表，用来收集所有结果
+all_roots = []    # 所有目录
+all_dirs = []     # 所有子文件夹
+all_files = []    # 所有文件
 
-load_dotenv()
+# 遍历
+for root, dirs, files in os.walk(root_path):
+    # 把每一轮的 root 加入列表
+    all_roots.append(root)
+    
+    # 把每一轮的 dirs 合并进大列表（用 extend 而不是 append）
+    all_dirs.extend(dirs)
+    
+    # 把每一轮的 files 合并进大列表
+    all_files.extend(files)
 
-
-async def clone_repo(url: str, target_dir: str) -> str | None:
-    """
-    clone repo
-    :param url: repo url
-    :param target_dir: clone target dir
-    :return: path of cloned repo
-    """
-    # ========== 修复 1：只在这里取一次环境变量 ==========
-    clone_target = os.getenv("CLONE_TARGET_PATH", target_dir)
-
-    # 检查 URL
-    if not check_url(url):
-        print("[red]❌ URL 不合法[/red]")
-        return None
-    url = to_proxy(url)
-    # ========== 修复 2：正确拼接路径 ==========
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    final_clone_path = os.path.abspath(os.path.join(base_dir, clone_target))
-
-    # ========== 修复 3：git 克隆命令 ==========
-    cmd = [
-        "git", "clone",
-        "--depth", "1",
-        url,
-        final_clone_path
-    ]
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            err = stderr.decode("utf-8", errors="ignore").strip()
-            print(f"[red]❌ 克隆失败：{err}[/red]")
-            return None
-
-        print(f"[green]✅ 克隆成功：[/green]{final_clone_path}")
-        return final_clone_path  # 成功一定返回路径
-
-    except Exception as e:
-        print(f"[red]❌ 克隆异常：{str(e)}[/red]")
-        return None
-
-
-async def main():
-    path = await clone_repo(
-        url="https://github.com/octocat/Hello-World.git",
-        target_dir="./clone"
-    )
-    print("最终路径：", path)
-
-
-def to_proxy(url: str) -> str | None:
-    """
-        自动给 GitHub URL 加上 xget 代理
-
-        """
-    if "github.com" in url:
-        # xget 官方加速格式
-        return url.replace(
-            "https://github.com/",
-            "https://xget.xi-xu.me/gh/"
-        )
-    return url
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# 最终你就得到了三个完整的大列表
+print("所有目录：", all_roots)
+print("所有子文件夹：", all_dirs)
+print("所有文件：", all_files)
