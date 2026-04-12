@@ -49,9 +49,7 @@
 - Docker 支持（一键部署）
 - Poetry / uv（依赖管理）
 
-## 📁 项目架构（推荐）
-
-
+## 📁 项目架构
 
 **核心 Workflow（LangGraph）**：
 1. 输入 URL → Metadata Agent
