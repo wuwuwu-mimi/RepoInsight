@@ -44,6 +44,35 @@ def build_llm_context_payload(
             'deploy_tools': profile.deploy_tools,
             'entrypoints': profile.entrypoints,
             'project_markers': profile.project_markers,
+            'subprojects': [
+                {
+                    'root_path': item.root_path,
+                    'language_scope': item.language_scope,
+                    'project_kind': item.project_kind,
+                    'config_paths': item.config_paths,
+                    'entrypoint_paths': item.entrypoint_paths,
+                    'markers': item.markers,
+                }
+                for item in profile.subprojects
+            ],
+            'code_symbols': [
+                {
+                    'name': item.name,
+                    'symbol_type': item.symbol_type,
+                    'source_path': item.source_path,
+                    'line_number': item.line_number,
+                }
+                for item in profile.code_symbols
+            ],
+            'module_relations': [
+                {
+                    'source_path': item.source_path,
+                    'target': item.target,
+                    'relation_type': item.relation_type,
+                    'line_number': item.line_number,
+                }
+                for item in profile.module_relations
+            ],
         },
         'current_rule_analysis': {
             'project_type': result.project_type,
@@ -64,6 +93,8 @@ def build_llm_context_payload(
                 'name': item.name,
                 'category': item.category,
                 'evidence': item.evidence,
+                'evidence_level': item.evidence_level,
+                'evidence_source': item.evidence_source,
             }
             for item in result.tech_stack
         ],
@@ -118,6 +149,9 @@ def build_llm_context_text(
         f"- deploy_tools: {_join_or_none(project_profile['deploy_tools'])}",
         f"- entrypoints: {_join_or_none(project_profile['entrypoints'])}",
         f"- project_markers: {_join_or_none(project_profile['project_markers'])}",
+        f"- subprojects: {_join_or_none([item['root_path'] for item in project_profile['subprojects']])}",
+        f"- code_symbols: {_join_or_none([item['name'] for item in project_profile['code_symbols'][:20]])}",
+        f"- module_relations: {_join_or_none([item['target'] for item in project_profile['module_relations'][:20]])}",
         '',
         '[当前规则分析]',
         f"- project_type: {rule_analysis['project_type'] or '暂未明确识别'}",
@@ -138,7 +172,10 @@ def build_llm_context_text(
 
     if tech_stack_signals:
         for item in tech_stack_signals:
-            lines.append(f"- {item['name']} ({item['category']}): {item['evidence']}")
+            lines.append(
+                f"- {item['name']} ({item['category']} / {item['evidence_level']} / {item['evidence_source']}): "
+                f"{item['evidence']}"
+            )
     else:
         lines.append('- 无')
 

@@ -17,7 +17,11 @@ from repoinsight.models.analysis_model import AnalysisRunResult
 from repoinsight.report.json_report import remove_json_report, save_json_report
 from repoinsight.report.markdown_report import remove_markdown_report, save_markdown_report
 from repoinsight.search.service import search_knowledge_base
-from repoinsight.storage.index_service import index_analysis_result, remove_indexed_repo
+from repoinsight.storage.index_service import (
+    index_analysis_result,
+    remove_indexed_repo,
+    remove_vector_indexed_repo,
+)
 
 app = typer.Typer()
 console = Console()
@@ -74,11 +78,11 @@ def analyze(
 
 @app.command(help='remove a repo')
 def remove(
-    repo_name: str,
+    repo_name: Annotated[str, typer.Argument(help='目标仓库标识，格式为 owner/repo')],
     remove_report: Annotated[
         bool,
-        typer.Option('--remove-report/--keep-report', help='是否同时删除本地分析报告'),
-    ] = False,
+        typer.Option('--remove-report/--keep-report', help='是否同时删除分析产物与知识索引，默认删除'),
+    ] = True,
     output_dir: Annotated[
         str,
         typer.Option('--output-dir', help='报告输出目录'),
@@ -109,6 +113,25 @@ def remove(
             print(f'[green]{repo_name}[/green] 的分析产物已删除')
         else:
             print(f'[yellow]{repo_name}[/yellow] 没有可删除的分析产物')
+    else:
+        print('[yellow]提示：已保留报告、知识库和向量索引；如需仅清理向量库，可执行 remove-vector。[/yellow]')
+
+
+@app.command(name='remove-vector', help='remove one repo from vector database only')
+def remove_vector(
+    repo_name: Annotated[str, typer.Argument(help='目标仓库标识，格式为 owner/repo')],
+) -> None:
+    """仅删除指定仓库在向量数据库中的索引。"""
+    try:
+        removed = remove_vector_indexed_repo(repo_name)
+    except Exception as exc:
+        print(f'[red]向量索引删除失败：{exc}[/red]')
+        return
+
+    if removed:
+        print(f'[green]{repo_name}[/green] 的向量索引已删除')
+    else:
+        print(f'[yellow]{repo_name}[/yellow] 在向量数据库中不存在，或当前未启用向量库')
 
 
 @app.command(name='list', help='list all cloned repos')
@@ -119,9 +142,13 @@ def list_repos() -> None:
         print('[yellow]当前没有已缓存的仓库[/yellow]')
         return
 
-    table = Table(title='本地已缓存仓库', show_lines=False)
+    table = Table(title='仓库资产总览', show_lines=False)
     table.add_column('仓库', style='cyan', no_wrap=True)
+    table.add_column('状态', style='bright_white', no_wrap=True)
+    table.add_column('Clone', style='green', no_wrap=True)
     table.add_column('报告', style='yellow', no_wrap=True)
+    table.add_column('知识库', style='blue', no_wrap=True)
+    table.add_column('向量库', style='magenta', no_wrap=True)
     table.add_column('最后修改时间', style='green')
     table.add_column('大小', justify='right', style='magenta')
     table.add_column('本地路径', style='white')
@@ -129,15 +156,75 @@ def list_repos() -> None:
     for repo in result.repos:
         table.add_row(
             repo.repo_id,
-            '有' if repo.has_report else '无',
+            repo.asset_status,
+            '有' if repo.has_clone else '无',
+            _render_report_status(repo),
+            '有' if repo.has_knowledge else '无',
+            '有' if repo.has_vector_index else '无',
             _format_datetime(repo.last_modified),
             _format_size(repo.size_bytes),
-            repo.local_path,
+            repo.local_path or '无',
         )
 
     print(table)
     print(f'[bold]总数[/bold]：{result.total_count}')
     print(f'[bold]clone 根目录[/bold]：{result.clone_root}')
+
+
+@app.command(name='cleanup-orphans', help='cleanup orphaned reports, knowledge docs and vector indexes')
+def cleanup_orphans(
+    dry_run: Annotated[
+        bool,
+        typer.Option('--dry-run/--execute', help='是否只预览孤儿资产，不实际删除'),
+    ] = False,
+    output_dir: Annotated[
+        str,
+        typer.Option('--output-dir', help='报告输出目录'),
+    ] = 'reports',
+) -> None:
+    """清理没有本地 clone、但仍残留报告/知识库/向量索引的孤儿资产。"""
+    result = list_cloned_repos()
+    orphan_repos = [
+        repo
+        for repo in result.repos
+        if not repo.has_clone
+        and (
+            repo.has_markdown_report
+            or repo.has_json_report
+            or repo.has_llm_context
+            or repo.has_knowledge
+            or repo.has_vector_index
+        )
+    ]
+
+    if not orphan_repos:
+        print('[green]当前没有孤儿资产需要清理[/green]')
+        return
+
+    if dry_run:
+        print('[yellow]以下仓库存在孤儿资产（仅预览，未删除）[/yellow]')
+        for repo in orphan_repos:
+            print(
+                f'- {repo.repo_id} | 状态：{repo.asset_status} | '
+                f'报告：{_render_report_status(repo)} | 知识库：{"有" if repo.has_knowledge else "无"} | '
+                f'向量库：{"有" if repo.has_vector_index else "无"}'
+            )
+        print(f'[bold]孤儿仓库数[/bold]：{len(orphan_repos)}')
+        return
+
+    removed_count = 0
+    for repo in orphan_repos:
+        markdown_removed = remove_markdown_report(repo.repo_id, output_dir=output_dir)
+        json_removed = remove_json_report(repo.repo_id, output_dir=output_dir)
+        llm_context_removed = remove_llm_context_text(repo.repo_id, output_dir=output_dir)
+        knowledge_removed = remove_indexed_repo(repo.repo_id)
+        if markdown_removed or json_removed or llm_context_removed or knowledge_removed:
+            removed_count += 1
+            print(f'[green]已清理[/green]：{repo.repo_id}（{repo.asset_status}）')
+        else:
+            print(f'[yellow]未清理到可删除内容[/yellow]：{repo.repo_id}')
+
+    print(f'[bold]已处理孤儿仓库数[/bold]：{removed_count}/{len(orphan_repos)}')
 
 
 @app.command(name='search', help='search analyzed repositories')
@@ -351,7 +438,10 @@ def _render_project_profile_summary(result: AnalysisRunResult) -> None:
         f"[b cyan]CI/CD:[/] {_join_or_none(profile.ci_cd_tools)}\n"
         f"[b cyan]部署工具:[/] {_join_or_none(profile.deploy_tools)}\n"
         f"[b cyan]入口文件:[/] {_join_or_none(profile.entrypoints)}\n"
-        f"[b cyan]项目标记:[/] {_join_or_none(profile.project_markers)}"
+        f"[b cyan]项目标记:[/] {_join_or_none(profile.project_markers)}\n"
+        f"[b cyan]子项目:[/] {_join_or_none([item.root_path for item in profile.subprojects])}\n"
+        f"[b cyan]关键符号数:[/] {len(profile.code_symbols)}\n"
+        f"[b cyan]模块依赖数:[/] {len(profile.module_relations)}"
     )
     print(Panel(output, title='[bold green]项目画像', border_style='cyan'))
 
@@ -365,10 +455,12 @@ def _render_tech_stack_summary(result: AnalysisRunResult) -> None:
     table = Table(title='技术栈推断', show_lines=False)
     table.add_column('技术', style='cyan', no_wrap=True)
     table.add_column('分类', style='green', no_wrap=True)
+    table.add_column('证据强度', style='yellow', no_wrap=True)
+    table.add_column('证据来源', style='magenta', no_wrap=True)
     table.add_column('证据', style='white')
 
     for item in result.tech_stack:
-        table.add_row(item.name, item.category, item.evidence)
+        table.add_row(item.name, item.category, item.evidence_level, item.evidence_source, item.evidence)
 
     print(table)
 
@@ -429,6 +521,18 @@ def _format_size(size_bytes: int | None) -> str:
 def _join_or_none(items: list[str]) -> str:
     """把列表拼接成更适合终端展示的文本。"""
     return ', '.join(items) if items else '无'
+
+
+def _render_report_status(repo) -> str:
+    """把多种报告状态压缩成紧凑展示文本。"""
+    parts: list[str] = []
+    if repo.has_markdown_report:
+        parts.append('MD')
+    if repo.has_json_report:
+        parts.append('JSON')
+    if repo.has_llm_context:
+        parts.append('LLM')
+    return '/'.join(parts) if parts else '无'
 
 
 def _print_json(payload: object) -> None:

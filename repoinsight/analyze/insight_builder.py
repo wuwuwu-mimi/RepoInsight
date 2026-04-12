@@ -24,6 +24,12 @@ CLI_ENTRY_FILE_NAMES = {
 }
 
 
+def _stack_signal_names(project_profile: ProjectProfile) -> list[str]:
+    """优先使用强/中证据确认过的技术栈。"""
+    signals = project_profile.confirmed_signals or project_profile.signals
+    return [item.name for item in signals]
+
+
 def infer_project_type(
     repo_info: RepoInfo,
     project_profile: ProjectProfile,
@@ -31,7 +37,7 @@ def infer_project_type(
     key_file_contents: list[KeyFileContent],
 ) -> tuple[str | None, str | None]:
     """根据技术栈、关键文件和 README 粗略推断项目类型。"""
-    stack_names = {item.name.lower() for item in project_profile.signals}
+    stack_names = {item.lower() for item in _stack_signal_names(project_profile)}
     key_file_names = {item.path.split('/')[-1].lower() for item in scan_result.key_files}
     readme_text = (repo_info.readme or '').lower()
     key_text = '\n'.join(item.content.lower() for item in key_file_contents)
@@ -71,7 +77,7 @@ def build_strengths(
 ) -> list[str]:
     """根据已有信息生成一组偏确定性的正向观察。"""
     strengths: list[str] = []
-    stack_names = {item.name.lower() for item in project_profile.signals}
+    stack_names = {item.lower() for item in _stack_signal_names(project_profile)}
     key_file_names = {item.path.split('/')[-1].lower() for item in scan_result.key_files}
 
     if repo_info.readme and repo_info.readme.strip():
@@ -102,7 +108,7 @@ def build_risks(
 ) -> list[str]:
     """根据已有信息生成一组偏保守的风险提示。"""
     risks: list[str] = []
-    stack_names = {item.name.lower() for item in project_profile.signals}
+    stack_names = {item.lower() for item in _stack_signal_names(project_profile)}
 
     if not repo_info.readme or not repo_info.readme.strip():
         risks.append('README 缺失或未成功获取，项目上手成本可能较高。')
@@ -134,7 +140,7 @@ def build_observations(
 ) -> list[str]:
     """汇总一些中性、偏描述性的初步观察。"""
     observations: list[str] = []
-    stack_names = [item.name for item in project_profile.signals]
+    stack_names = _stack_signal_names(project_profile)
 
     if project_type:
         observations.append(f'该仓库初步被归类为：{project_type}。')

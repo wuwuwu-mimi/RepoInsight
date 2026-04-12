@@ -32,6 +32,69 @@ class TechStackItem(BaseModel):
     # 用于说明推断来源的证据文本。
     evidence: str = Field(..., description='推断证据')
 
+    # 证据强度，例如 strong、medium、weak。
+    evidence_level: str = Field(default='medium', description='证据强度')
+
+    # 证据来源类型，例如 dependency、config、import、runtime_call、metadata。
+    evidence_source: str = Field(default='unknown', description='证据来源类型')
+
+    # 证据对应的来源文件；若来自 GitHub 元数据则可为空。
+    source_path: str | None = Field(default=None, description='证据来源文件')
+
+
+class CodeSymbol(BaseModel):
+    """表示从关键文件中抽取出的符号定义。"""
+
+    # 符号名称，例如 app、main、build_cli。
+    name: str = Field(..., description='符号名称')
+
+    # 符号类型，例如 function、class、variable、route。
+    symbol_type: str = Field(..., description='符号类型')
+
+    # 符号所在文件路径。
+    source_path: str = Field(..., description='来源文件路径')
+
+    # 符号所在的大致行号。
+    line_number: int | None = Field(default=None, description='大致行号')
+
+
+class ModuleRelation(BaseModel):
+    """表示关键文件之间或对外模块的引用关系。"""
+
+    # 当前关系的源文件。
+    source_path: str = Field(..., description='源文件路径')
+
+    # 关系目标，例如导入的模块或包名。
+    target: str = Field(..., description='关系目标')
+
+    # 关系类型，例如 import、require、use、route。
+    relation_type: str = Field(..., description='关系类型')
+
+    # 关系出现的大致行号。
+    line_number: int | None = Field(default=None, description='大致行号')
+
+
+class SubprojectSummary(BaseModel):
+    """表示复杂仓库中的一个子项目或工作区。"""
+
+    # 子项目根目录，相对于仓库根目录。
+    root_path: str = Field(..., description='子项目根目录')
+
+    # 子项目语言范围，例如 python、nodejs、go。
+    language_scope: str = Field(..., description='语言范围')
+
+    # 子项目识别类型，例如 package、service、workspace。
+    project_kind: str = Field(..., description='子项目类型')
+
+    # 与子项目相关的配置文件。
+    config_paths: list[str] = Field(default_factory=list, description='配置文件列表')
+
+    # 与子项目相关的入口文件。
+    entrypoint_paths: list[str] = Field(default_factory=list, description='入口文件列表')
+
+    # 子项目标签，例如 monorepo_workspace、service。
+    markers: list[str] = Field(default_factory=list, description='子项目标签')
+
 
 class ProjectProfile(BaseModel):
     """表示面向多语言仓库的结构化项目画像。"""
@@ -68,6 +131,21 @@ class ProjectProfile(BaseModel):
 
     # 用于标记项目特征的额外标签，例如 monorepo、library、cli。
     project_markers: list[str] = Field(default_factory=list, description='项目特征标签')
+
+    # 从关键文件中抽取出的子项目列表，便于理解 monorepo 或多服务结构。
+    subprojects: list[SubprojectSummary] = Field(default_factory=list, description='子项目列表')
+
+    # 从关键文件中抽取出的符号定义，便于做更细粒度证据展示。
+    code_symbols: list[CodeSymbol] = Field(default_factory=list, description='代码符号列表')
+
+    # 从关键文件中抽取出的模块关系，便于理解入口和依赖链。
+    module_relations: list[ModuleRelation] = Field(default_factory=list, description='模块关系列表')
+
+    # 仅包含强/中证据的确认技术栈，适合作为默认展示与问答依据。
+    confirmed_signals: list[TechStackItem] = Field(default_factory=list, description='确认技术栈信号')
+
+    # 仅包含弱证据的候选技术栈，便于后续人工复核。
+    weak_signals: list[TechStackItem] = Field(default_factory=list, description='弱证据候选信号')
 
     # 所有结构化识别结果的证据集合，可继续复用于报告和规则判断。
     signals: list[TechStackItem] = Field(default_factory=list, description='项目画像识别信号')
