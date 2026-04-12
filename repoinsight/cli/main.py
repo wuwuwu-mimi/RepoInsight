@@ -1,13 +1,17 @@
+import json
 from datetime import datetime
 from typing import Annotated
 
 import typer
+from rich.console import Console
 from rich import print
 from rich.panel import Panel
 from rich.table import Table
 
+from repoinsight.answer.service import answer_repo_question
 from repoinsight.analyze.pipeline import run_analysis
 from repoinsight.ingest.repo_cache import list_cloned_repos, remove_cloned_repo
+from repoinsight.llm.config import get_llm_config_help_text, get_llm_settings
 from repoinsight.llm.context_builder import remove_llm_context_text, save_llm_context_text
 from repoinsight.models.analysis_model import AnalysisRunResult
 from repoinsight.report.json_report import remove_json_report, save_json_report
@@ -16,6 +20,7 @@ from repoinsight.search.service import search_knowledge_base
 from repoinsight.storage.index_service import index_analysis_result, remove_indexed_repo
 
 app = typer.Typer()
+console = Console()
 
 
 @app.command(help='get version')
@@ -54,11 +59,15 @@ def analyze(
             markdown_path = save_markdown_report(result, output_dir=output_dir)
             json_path = save_json_report(result, output_dir=output_dir)
             llm_context_path = save_llm_context_text(result, output_dir=output_dir)
-            knowledge_path = index_analysis_result(result)
+            index_result = index_analysis_result(result)
             print(f'[green]Markdown 报告已保存[/green]：{markdown_path}')
             print(f'[green]JSON 报告已保存[/green]：{json_path}')
             print(f'[green]LLM 上下文已保存[/green]：{llm_context_path}')
-            print(f'[green]知识索引已保存[/green]：{knowledge_path}')
+            print(f'[green]知识文档已保存[/green]：{index_result.local_path}')
+            if index_result.vector_indexed:
+                print(f'[green]向量索引已写入[/green]：{index_result.vector_backend}')
+            elif index_result.message:
+                print(f'[yellow]{index_result.message}[/yellow]')
         except Exception as exc:
             print(f'[red]报告保存失败：{exc}[/red]')
 
@@ -140,6 +149,7 @@ def search(
     result = search_knowledge_base(query=query, top_k=top_k)
     if not result.hits:
         print('[yellow]当前没有命中结果，请先执行 analyze 建立知识索引[/yellow]')
+        print(f'[bold]检索后端[/bold]：{result.backend}')
         print(f'[bold]知识库仓库数[/bold]：{result.repo_count}')
         print(f'[bold]知识库文档数[/bold]：{result.document_count}')
         return
@@ -162,8 +172,90 @@ def search(
         )
 
     print(table)
+    print(f'[bold]检索后端[/bold]：{result.backend}')
     print(f'[bold]知识库仓库数[/bold]：{result.repo_count}')
     print(f'[bold]知识库文档数[/bold]：{result.document_count}')
+
+
+@app.command(name='answer', help='answer a question for one analyzed repository')
+def answer(
+    repo_name: Annotated[str, typer.Argument(help='目标仓库标识，格式为 owner/repo')],
+    question: Annotated[str, typer.Argument(help='希望询问的问题')],
+    top_k: Annotated[int, typer.Option('--top-k', min=1, help='检索证据数量')] = 5,
+    use_llm: Annotated[
+        bool,
+        typer.Option('--llm/--no-llm', help='是否启用 LLM 生成最终回答'),
+    ] = True,
+    as_json: Annotated[
+        bool,
+        typer.Option('--json', help='是否输出 JSON 结果'),
+    ] = False,
+    stream: Annotated[
+        bool,
+        typer.Option('--stream/--no-stream', help='是否在终端流式输出 LLM 回答'),
+    ] = True,
+) -> None:
+    """针对单个已分析仓库做基于检索的 MVP 回答。"""
+    stream_callback = None
+    should_stream = bool(stream and use_llm and not as_json)
+    if should_stream:
+        print('[bold green]LLM 正在流式生成回答...[/bold green]')
+        stream_callback = _build_stream_callback()
+
+    result = answer_repo_question(
+        repo_id=repo_name,
+        question=question,
+        top_k=top_k,
+        use_llm=use_llm,
+        llm_stream=should_stream,
+        on_llm_chunk=stream_callback,
+    )
+
+    if as_json:
+        _print_json(result.model_dump(exclude_none=True))
+        return
+
+    if should_stream and result.answer_mode == 'llm':
+        console.print()
+    else:
+        print(
+            Panel(
+                result.answer,
+                title=f'[bold green]仓库问答：{repo_name}',
+                border_style='cyan',
+            )
+        )
+
+    print(f'[bold]回答模式[/bold]：{result.answer_mode}')
+    print(f'[bold]检索后端[/bold]：{result.backend}')
+    print(f'[bold]是否降级[/bold]：{"是" if result.fallback_used else "否"}')
+    print(f'[bold]LLM 开关[/bold]：{"开启" if result.llm_enabled else "关闭"}')
+    print(f'[bold]LLM 配置[/bold]：{"已配置" if get_llm_settings() else "未配置"}')
+    print(f'[bold]LLM 尝试[/bold]：{"是" if result.llm_attempted else "否"}')
+    if result.llm_error:
+        print(f'[yellow]LLM 回退原因[/yellow]：{result.llm_error}')
+
+    if not result.evidence:
+        print('[yellow]当前没有可展示的证据，请先执行 analyze 建立知识索引[/yellow]')
+        if result.llm_enabled and get_llm_settings() is None:
+            print(f'[yellow]{get_llm_config_help_text()}[/yellow]')
+        return
+
+    table = Table(title='回答证据', show_lines=False)
+    table.add_column('类型', style='green', no_wrap=True)
+    table.add_column('来源', style='yellow')
+    table.add_column('摘要片段', style='white')
+
+    for evidence in result.evidence:
+        table.add_row(
+            evidence.doc_type,
+            evidence.source_path or '仓库级文档',
+            evidence.snippet,
+        )
+
+    print(table)
+    if result.llm_enabled and get_llm_settings() is None:
+        print(f'[yellow]{get_llm_config_help_text()}[/yellow]')
 
 
 
@@ -337,6 +429,19 @@ def _format_size(size_bytes: int | None) -> str:
 def _join_or_none(items: list[str]) -> str:
     """把列表拼接成更适合终端展示的文本。"""
     return ', '.join(items) if items else '无'
+
+
+def _print_json(payload: object) -> None:
+    """输出结构化 JSON，便于后续脚本调用。"""
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _build_stream_callback():
+    """构造一个适合 Rich 终端流式输出的回调。"""
+    def _callback(chunk: str) -> None:
+        console.print(chunk, end='', markup=False, highlight=False)
+
+    return _callback
 
 
 if __name__ == '__main__':
