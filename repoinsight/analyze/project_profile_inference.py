@@ -2,7 +2,10 @@ import json
 import re
 import tomllib
 
+from repoinsight.analyze.code_index_inference import extract_code_index
 from repoinsight.models.analysis_model import (
+    CodeEntity,
+    CodeRelationEdge,
     CodeSymbol,
     KeyFileContent,
     ModuleRelation,
@@ -105,7 +108,15 @@ def infer_project_profile(
     _infer_from_file_paths(scan_result, inferred, entrypoints, project_markers)
     _infer_from_file_contents(key_file_contents, inferred, entrypoints, project_markers)
     subprojects = _infer_subprojects(scan_result, key_file_contents, sorted(entrypoints))
-    code_symbols, module_relations = _extract_code_structure(key_file_contents)
+    code_symbols, module_relations, function_summaries, class_summaries, api_route_summaries = extract_code_index(key_file_contents)
+    code_entities = _build_code_entities(code_symbols, function_summaries, class_summaries, api_route_summaries)
+    code_relation_edges = _build_code_relation_edges(
+        module_relations,
+        code_symbols,
+        function_summaries,
+        class_summaries,
+        api_route_summaries,
+    )
     _infer_from_module_relations(module_relations, inferred)
 
     signals = sorted(inferred.values(), key=_signal_sort_key)
@@ -126,10 +137,232 @@ def infer_project_profile(
         subprojects=subprojects,
         code_symbols=code_symbols,
         module_relations=module_relations,
+        code_entities=code_entities,
+        code_relation_edges=code_relation_edges,
+        function_summaries=function_summaries,
+        class_summaries=class_summaries,
+        api_route_summaries=api_route_summaries,
         confirmed_signals=confirmed_signals,
         weak_signals=weak_signals,
         signals=signals,
     )
+
+
+def _build_code_entities(
+    code_symbols: list[CodeSymbol],
+    function_summaries,
+    class_summaries,
+    api_route_summaries,
+) -> list[CodeEntity]:
+    """把已有语言特定结构统一收敛成通用代码实体。"""
+    entities: list[CodeEntity] = []
+    seen: set[tuple[str, str, str | None]] = set()
+
+    def add_entity(entity: CodeEntity) -> None:
+        key = (entity.entity_kind, entity.qualified_name or entity.name, entity.source_path)
+        if key in seen:
+            return
+        seen.add(key)
+        entities.append(entity)
+
+    for item in code_symbols:
+        location = f'{item.source_path}:L{item.line_number}' if item.line_number else item.source_path
+        add_entity(
+            CodeEntity(
+                entity_kind='symbol',
+                name=item.name,
+                qualified_name=item.name,
+                source_path=item.source_path,
+                location=location,
+                tags=[item.symbol_type],
+            )
+        )
+
+    for item in function_summaries:
+        location = _build_location(item.source_path, item.line_start, item.line_end)
+        tags = ['function']
+        if item.owner_class:
+            tags.append('method')
+        if item.is_async:
+            tags.append('async')
+        add_entity(
+            CodeEntity(
+                entity_kind='function',
+                name=item.name,
+                qualified_name=item.qualified_name,
+                source_path=item.source_path,
+                language_scope=item.language_scope,
+                location=location,
+                tags=tags,
+            )
+        )
+
+    for item in class_summaries:
+        add_entity(
+            CodeEntity(
+                entity_kind='class',
+                name=item.name,
+                qualified_name=item.qualified_name,
+                source_path=item.source_path,
+                language_scope=item.language_scope,
+                location=_build_location(item.source_path, item.line_start, item.line_end),
+                tags=['class'],
+            )
+        )
+
+    for item in api_route_summaries:
+        route_name = f'{",".join(item.http_methods) or "ANY"} {item.route_path}'
+        add_entity(
+            CodeEntity(
+                entity_kind='api_route',
+                name=route_name,
+                qualified_name=item.handler_qualified_name,
+                source_path=item.source_path,
+                language_scope=item.language_scope,
+                location=f'{item.source_path}:L{item.line_number}' if item.line_number else item.source_path,
+                tags=['route', item.framework or 'unknown'],
+            )
+        )
+
+    return entities
+
+
+def _build_code_relation_edges(
+    module_relations: list[ModuleRelation],
+    code_symbols,
+    function_summaries,
+    class_summaries,
+    api_route_summaries,
+) -> list[CodeRelationEdge]:
+    """把 import、调用链、路由绑定等信息统一成关系边。"""
+    edges: list[CodeRelationEdge] = []
+    seen: set[tuple[str, str, str, str | None, int | None]] = set()
+
+    def add_edge(edge: CodeRelationEdge) -> None:
+        key = (edge.source_ref, edge.target_ref, edge.relation_type, edge.source_path, edge.line_number)
+        if key in seen:
+            return
+        seen.add(key)
+        edges.append(edge)
+
+    for relation in module_relations:
+        add_edge(
+            CodeRelationEdge(
+                source_ref=relation.source_path,
+                target_ref=relation.target,
+                relation_type=relation.relation_type,
+                source_path=relation.source_path,
+                line_number=relation.line_number,
+            )
+        )
+
+    for item in code_symbols:
+        if item.symbol_type in {'function', 'class'}:
+            continue
+        add_edge(
+            CodeRelationEdge(
+                source_ref=item.source_path,
+                target_ref=item.name,
+                relation_type='contain_symbol',
+                source_path=item.source_path,
+                line_number=item.line_number,
+            )
+        )
+
+    for item in class_summaries:
+        add_edge(
+            CodeRelationEdge(
+                source_ref=item.source_path,
+                target_ref=item.qualified_name,
+                relation_type='contain_symbol',
+                source_path=item.source_path,
+                line_number=item.line_start,
+            )
+        )
+        for base_name in item.bases:
+            add_edge(
+                CodeRelationEdge(
+                    source_ref=item.qualified_name,
+                    target_ref=base_name,
+                    relation_type='inherit',
+                    source_path=item.source_path,
+                    line_number=item.line_start,
+                )
+            )
+
+    for item in function_summaries:
+        source_ref = item.qualified_name
+        add_edge(
+            CodeRelationEdge(
+                source_ref=item.source_path,
+                target_ref=source_ref,
+                relation_type='contain_symbol',
+                source_path=item.source_path,
+                line_number=item.line_start,
+            )
+        )
+        if item.owner_class:
+            add_edge(
+                CodeRelationEdge(
+                    source_ref=item.owner_class,
+                    target_ref=source_ref,
+                    relation_type='define_method',
+                    source_path=item.source_path,
+                    line_number=item.line_start,
+                )
+            )
+        for called_symbol in item.called_symbols:
+            add_edge(
+                CodeRelationEdge(
+                    source_ref=source_ref,
+                    target_ref=called_symbol,
+                    relation_type='call',
+                    source_path=item.source_path,
+                    line_number=item.line_start,
+                )
+            )
+
+    for item in api_route_summaries:
+        route_ref = f'{",".join(item.http_methods) or "ANY"} {item.route_path}'
+        add_edge(
+            CodeRelationEdge(
+                source_ref=item.source_path,
+                target_ref=route_ref,
+                relation_type='contain_route',
+                source_path=item.source_path,
+                line_number=item.line_number,
+            )
+        )
+        add_edge(
+            CodeRelationEdge(
+                source_ref=route_ref,
+                target_ref=item.handler_qualified_name,
+                relation_type='handle_route',
+                source_path=item.source_path,
+                line_number=item.line_number,
+            )
+        )
+        for called_symbol in item.called_symbols:
+            add_edge(
+                CodeRelationEdge(
+                    source_ref=item.handler_qualified_name,
+                    target_ref=called_symbol,
+                    relation_type='call',
+                    source_path=item.source_path,
+                    line_number=item.line_number,
+                )
+            )
+
+    return edges
+
+
+def _build_location(source_path: str, line_start: int | None, line_end: int | None) -> str:
+    """统一构造源码位置字符串。"""
+    if line_start and line_end and line_end != line_start:
+        return f'{source_path}:L{line_start}-L{line_end}'
+    if line_start:
+        return f'{source_path}:L{line_start}'
+    return source_path
 
 
 def _infer_from_repo_metadata(repo_info: RepoInfo, inferred: dict[str, TechStackItem]) -> None:

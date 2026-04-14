@@ -86,6 +86,57 @@ def generate_json_report_payload(
                 }
                 for item in profile.module_relations
             ],
+            'function_summaries': [
+                {
+                    'name': item.name,
+                    'qualified_name': item.qualified_name,
+                    'source_path': item.source_path,
+                    'language_scope': item.language_scope,
+                    'line_start': item.line_start,
+                    'line_end': item.line_end,
+                    'signature': item.signature,
+                    'owner_class': item.owner_class,
+                    'is_async': item.is_async,
+                    'decorators': item.decorators,
+                    'parameters': item.parameters,
+                    'called_symbols': item.called_symbols,
+                    'return_signals': item.return_signals,
+                    'summary': item.summary,
+                }
+                for item in profile.function_summaries
+            ],
+            'class_summaries': [
+                {
+                    'name': item.name,
+                    'qualified_name': item.qualified_name,
+                    'source_path': item.source_path,
+                    'language_scope': item.language_scope,
+                    'line_start': item.line_start,
+                    'line_end': item.line_end,
+                    'bases': item.bases,
+                    'decorators': item.decorators,
+                    'methods': item.methods,
+                    'summary': item.summary,
+                }
+                for item in profile.class_summaries
+            ],
+            'api_route_summaries': [
+                {
+                    'route_path': item.route_path,
+                    'http_methods': item.http_methods,
+                    'source_path': item.source_path,
+                    'language_scope': item.language_scope,
+                    'framework': item.framework,
+                    'handler_name': item.handler_name,
+                    'handler_qualified_name': item.handler_qualified_name,
+                    'owner_class': item.owner_class,
+                    'line_number': item.line_number,
+                    'decorators': item.decorators,
+                    'called_symbols': item.called_symbols,
+                    'summary': item.summary,
+                }
+                for item in profile.api_route_summaries
+            ],
             'confirmed_signals': [
                 {
                     'name': item.name,
@@ -138,6 +189,9 @@ def generate_json_report_payload(
                 'subproject_root': _match_subproject_root(result, item.path),
                 'code_symbols': _get_file_symbol_payload(result, item.path),
                 'module_relations': _get_file_relation_payload(result, item.path),
+                'function_summaries': _get_file_function_payload(result, item.path),
+                'class_summaries': _get_file_class_payload(result, item.path),
+                'api_route_summaries': _get_file_api_route_payload(result, item.path),
             }
             for item in result.scan_result.key_files
         ],
@@ -214,6 +268,9 @@ def _serialize_key_file_content(
         'subproject_root': _match_subproject_root(result, item.path),
         'code_symbols': _get_file_symbol_payload(result, item.path),
         'module_relations': _get_file_relation_payload(result, item.path),
+        'function_summaries': _get_file_function_payload(result, item.path),
+        'class_summaries': _get_file_class_payload(result, item.path),
+        'api_route_summaries': _get_file_api_route_payload(result, item.path),
     }
 
 
@@ -243,6 +300,68 @@ def _get_file_symbol_payload(result: AnalysisRunResult, source_path: str) -> lis
                 'name': item.name,
                 'symbol_type': item.symbol_type,
                 'line_number': item.line_number,
+            }
+        )
+    return payload
+
+
+def _get_file_function_payload(result: AnalysisRunResult, source_path: str) -> list[dict[str, Any]]:
+    """提取某个文件对应的函数级摘要列表。"""
+    payload: list[dict[str, Any]] = []
+    for item in result.project_profile.function_summaries:
+        if item.source_path != source_path:
+            continue
+        payload.append(
+            {
+                'name': item.name,
+                'qualified_name': item.qualified_name,
+                'line_start': item.line_start,
+                'line_end': item.line_end,
+                'signature': item.signature,
+                'owner_class': item.owner_class,
+                'called_symbols': item.called_symbols,
+                'summary': item.summary,
+            }
+        )
+    return payload
+
+
+def _get_file_class_payload(result: AnalysisRunResult, source_path: str) -> list[dict[str, Any]]:
+    """提取某个文件对应的类级摘要列表。"""
+    payload: list[dict[str, Any]] = []
+    for item in result.project_profile.class_summaries:
+        if item.source_path != source_path:
+            continue
+        payload.append(
+            {
+                'name': item.name,
+                'qualified_name': item.qualified_name,
+                'line_start': item.line_start,
+                'line_end': item.line_end,
+                'bases': item.bases,
+                'methods': item.methods,
+                'summary': item.summary,
+            }
+        )
+    return payload
+
+
+def _get_file_api_route_payload(result: AnalysisRunResult, source_path: str) -> list[dict[str, Any]]:
+    """提取某个文件对应的接口级摘要列表。"""
+    payload: list[dict[str, Any]] = []
+    for item in result.project_profile.api_route_summaries:
+        if item.source_path != source_path:
+            continue
+        payload.append(
+            {
+                'route_path': item.route_path,
+                'http_methods': item.http_methods,
+                'framework': item.framework,
+                'handler_name': item.handler_name,
+                'handler_qualified_name': item.handler_qualified_name,
+                'line_number': item.line_number,
+                'called_symbols': item.called_symbols,
+                'summary': item.summary,
             }
         )
     return payload

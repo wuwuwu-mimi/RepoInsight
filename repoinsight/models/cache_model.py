@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -30,10 +30,10 @@ class CachedRepoEntry(BaseModel):
     # 本地目录大小，单位为字节。
     size_bytes: int | None = Field(default=None, description='目录大小（字节）')
 
-    # 是否存在对应的 Markdown 分析报告。
+    # 是否存在任意分析报告产物。
     has_report: bool = Field(default=False, description='是否存在分析报告')
 
-    # 对应的 Markdown 报告路径；不存在时为 None。
+    # 代表性报告路径，优先返回 Markdown 报告路径。
     report_path: str | None = Field(default=None, description='分析报告路径')
 
     # 是否存在 Markdown 报告。
@@ -41,6 +41,9 @@ class CachedRepoEntry(BaseModel):
 
     # 是否存在 JSON 报告。
     has_json_report: bool = Field(default=False, description='是否存在 JSON 报告')
+
+    # 是否存在 PDF 报告。
+    has_pdf_report: bool = Field(default=False, description='是否存在 PDF 报告')
 
     # 是否存在 LLM 上下文文件。
     has_llm_context: bool = Field(default=False, description='是否存在 LLM 上下文')
@@ -51,7 +54,7 @@ class CachedRepoEntry(BaseModel):
     # 是否存在向量索引。
     has_vector_index: bool = Field(default=False, description='是否存在向量索引')
 
-    # 当前仓库资产状态，例如 完整、仅索引残留、仅知识残留。
+    # 当前仓库资产状态，例如 完整、仅索引残留。
     asset_status: str = Field(default='未知', description='仓库资产状态')
 
 

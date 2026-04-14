@@ -127,6 +127,24 @@ def test_infer_project_profile_extracts_subprojects_and_code_structure() -> None
     assert ('services/api/app.py', 'fastapi', 'import') in relation_targets
     assert ('services/api/app.py', 'api.router', 'import') in relation_targets
     assert ('packages/web/src/main.tsx', 'react-dom/client', 'import') in relation_targets
+    assert any(item.entity_kind == 'function' and item.qualified_name == 'create_app' for item in profile.code_entities)
+    assert any(item.entity_kind == 'class' and item.qualified_name == 'Settings' for item in profile.code_entities)
+    assert any(
+        item.source_ref == 'services/api/app.py' and item.target_ref == 'api.router' and item.relation_type == 'import'
+        for item in profile.code_relation_edges
+    )
+    assert any(
+        item.source_ref == 'services/api/app.py' and item.target_ref == 'Settings' and item.relation_type == 'contain_symbol'
+        for item in profile.code_relation_edges
+    )
+    assert any(
+        item.source_ref == 'services/api/app.py' and item.target_ref == 'create_app' and item.relation_type == 'contain_symbol'
+        for item in profile.code_relation_edges
+    )
+    assert any(
+        item.source_ref == 'create_app' and item.target_ref == 'FastAPI' and item.relation_type == 'call'
+        for item in profile.code_relation_edges
+    )
     assert any(item.name == 'FastAPI' and item.evidence_level == 'strong' for item in profile.confirmed_signals)
 
 

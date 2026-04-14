@@ -1,4 +1,4 @@
-from repoinsight.models.analysis_model import AnalysisRunResult, KeyFileContent
+from repoinsight.models.analysis_model import AnalysisRunResult, ApiRouteSummary, ClassSummary, FunctionSummary, KeyFileContent
 from repoinsight.models.rag_model import ConfigSummary, EntrypointSummary, KnowledgeDocument
 from repoinsight.storage.summary_builders import build_config_summaries, build_entrypoint_summaries
 
@@ -25,6 +25,15 @@ def build_knowledge_documents(result: AnalysisRunResult) -> list[KnowledgeDocume
 
     for summary in build_entrypoint_summaries(result):
         documents.append(_build_entrypoint_summary_document(summary, result))
+
+    for summary in result.project_profile.api_route_summaries:
+        documents.append(_build_api_route_summary_document(summary, result))
+
+    for summary in result.project_profile.function_summaries:
+        documents.append(_build_function_summary_document(summary, result))
+
+    for summary in result.project_profile.class_summaries:
+        documents.append(_build_class_summary_document(summary, result))
 
     for subproject in result.project_profile.subprojects:
         documents.append(_build_subproject_summary_document(result, subproject.root_path))
@@ -318,6 +327,190 @@ def _build_subproject_summary_document(
     )
 
 
+def _build_api_route_summary_document(
+    summary: ApiRouteSummary,
+    result: AnalysisRunResult,
+) -> KnowledgeDocument:
+    """把接口/路由级摘要转换成可检索知识文档。"""
+    metadata = _build_common_metadata(result)
+    subproject_root, subproject_markers = _resolve_subproject_context(result, summary.source_path)
+    methods_text = '/'.join(summary.http_methods) if summary.http_methods else 'HTTP'
+    route_ref = f'{methods_text} {summary.route_path}'
+    relation_edges = [
+        (summary.source_path, route_ref, 'contain_route'),
+        (route_ref, summary.handler_qualified_name, 'handle_route'),
+        *[
+            (summary.handler_qualified_name, called_symbol, 'call')
+            for called_symbol in summary.called_symbols
+        ],
+    ]
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'api_route',
+            'route_path': summary.route_path,
+            'http_methods': summary.http_methods,
+            'framework': summary.framework or '',
+            'handler_name': summary.handler_name,
+            'handler_qualified_name': summary.handler_qualified_name,
+            'owner_class': summary.owner_class or '',
+            'language_scope': summary.language_scope,
+            'line_number': summary.line_number or 0,
+            'decorators': summary.decorators,
+            'called_symbols': summary.called_symbols,
+            'subproject_root': subproject_root or '',
+            'subproject_markers': subproject_markers,
+            'code_entity_names': [route_ref, summary.handler_name],
+            'code_entity_kinds': ['api_route', 'function'],
+            'code_entity_refs': [route_ref, summary.handler_qualified_name],
+        }
+    )
+    metadata.update(_build_relation_metadata(relation_edges))
+    lines = [
+        f'仓库 {result.repo_info.repo_model.full_name} 中的接口/路由实现摘要。',
+        f'来源文件：{summary.source_path}',
+        f'路由路径：{summary.route_path}',
+        f'HTTP 方法：{methods_text}',
+        f'框架线索：{summary.framework or "未知"}',
+        f'处理函数：{summary.handler_name}',
+        f'处理限定名：{summary.handler_qualified_name}',
+        f'所属类：{summary.owner_class or "无"}',
+        f'代码位置：{_format_line_range(summary.line_number, summary.line_number)}',
+        f'装饰器/注册：{_join_or_none(summary.decorators)}',
+        f'调用：{_join_or_none(summary.called_symbols)}',
+        f'所属子项目：{subproject_root or "无"}',
+        f'摘要：{summary.summary}',
+    ]
+    return KnowledgeDocument(
+        doc_id=(
+            f'{result.repo_info.repo_model.full_name}::api_route_summary::'
+            f'{summary.source_path}::{methods_text}::{summary.route_path}'
+        ),
+        repo_id=result.repo_info.repo_model.full_name,
+        doc_type='api_route_summary',
+        title=f'{result.repo_info.repo_model.full_name}::{methods_text} {summary.route_path} 接口摘要',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
+def _build_function_summary_document(
+    summary: FunctionSummary,
+    result: AnalysisRunResult,
+) -> KnowledgeDocument:
+    """把函数级摘要转换成可检索知识文档。"""
+    metadata = _build_common_metadata(result)
+    subproject_root, subproject_markers = _resolve_subproject_context(result, summary.source_path)
+    relation_edges = [(summary.source_path, summary.qualified_name, 'contain_symbol')]
+    if summary.owner_class:
+        relation_edges.append((summary.owner_class, summary.qualified_name, 'define_method'))
+    relation_edges.extend((summary.qualified_name, called_symbol, 'call') for called_symbol in summary.called_symbols)
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'function',
+            'symbol_name': summary.name,
+            'qualified_name': summary.qualified_name,
+            'owner_class': summary.owner_class or '',
+            'language_scope': summary.language_scope,
+            'line_start': summary.line_start or 0,
+            'line_end': summary.line_end or 0,
+            'signature': summary.signature,
+            'decorators': summary.decorators,
+            'parameters': summary.parameters,
+            'called_symbols': summary.called_symbols,
+            'return_signals': summary.return_signals,
+            'subproject_root': subproject_root or '',
+            'subproject_markers': subproject_markers,
+            'code_entity_names': [summary.name],
+            'code_entity_kinds': ['function'],
+            'code_entity_refs': [summary.qualified_name],
+        }
+    )
+    metadata.update(_build_relation_metadata(relation_edges))
+    lines = [
+        f'仓库 {result.repo_info.repo_model.full_name} 中的函数/方法实现摘要。',
+        f'来源文件：{summary.source_path}',
+        f'符号名称：{summary.name}',
+        f'限定名：{summary.qualified_name}',
+        f'语言范围：{summary.language_scope}',
+        f'代码位置：{_format_line_range(summary.line_start, summary.line_end)}',
+        f'所属类：{summary.owner_class or "无"}',
+        f'函数签名：{summary.signature}',
+        f'装饰器：{_join_or_none(summary.decorators)}',
+        f'参数：{_join_or_none(summary.parameters)}',
+        f'调用：{_join_or_none(summary.called_symbols)}',
+        f'返回线索：{_join_or_none(summary.return_signals)}',
+        f'所属子项目：{subproject_root or "无"}',
+        f'摘要：{summary.summary}',
+    ]
+    return KnowledgeDocument(
+        doc_id=f'{result.repo_info.repo_model.full_name}::function_summary::{summary.source_path}::{summary.qualified_name}',
+        repo_id=result.repo_info.repo_model.full_name,
+        doc_type='function_summary',
+        title=f'{result.repo_info.repo_model.full_name}::{summary.qualified_name} 函数摘要',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
+def _build_class_summary_document(
+    summary: ClassSummary,
+    result: AnalysisRunResult,
+) -> KnowledgeDocument:
+    """把类级摘要转换成可检索知识文档。"""
+    metadata = _build_common_metadata(result)
+    subproject_root, subproject_markers = _resolve_subproject_context(result, summary.source_path)
+    method_refs = _resolve_class_method_refs(summary, result)
+    relation_edges = [(summary.source_path, summary.qualified_name, 'contain_symbol')]
+    relation_edges.extend((summary.qualified_name, method_ref, 'define_method') for method_ref in method_refs)
+    relation_edges.extend((summary.qualified_name, base_name, 'inherit') for base_name in summary.bases)
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'class',
+            'symbol_name': summary.name,
+            'qualified_name': summary.qualified_name,
+            'language_scope': summary.language_scope,
+            'line_start': summary.line_start or 0,
+            'line_end': summary.line_end or 0,
+            'bases': summary.bases,
+            'decorators': summary.decorators,
+            'class_methods': summary.methods,
+            'subproject_root': subproject_root or '',
+            'subproject_markers': subproject_markers,
+            'code_entity_names': [summary.name] + summary.methods,
+            'code_entity_kinds': ['class'] + (['function'] * len(summary.methods)),
+            'code_entity_refs': [summary.qualified_name] + method_refs,
+        }
+    )
+    metadata.update(_build_relation_metadata(relation_edges))
+    lines = [
+        f'仓库 {result.repo_info.repo_model.full_name} 中的类实现摘要。',
+        f'来源文件：{summary.source_path}',
+        f'类名称：{summary.name}',
+        f'限定名：{summary.qualified_name}',
+        f'语言范围：{summary.language_scope}',
+        f'代码位置：{_format_line_range(summary.line_start, summary.line_end)}',
+        f'继承：{_join_or_none(summary.bases)}',
+        f'装饰器：{_join_or_none(summary.decorators)}',
+        f'方法：{_join_or_none(summary.methods)}',
+        f'所属子项目：{subproject_root or "无"}',
+        f'摘要：{summary.summary}',
+    ]
+    return KnowledgeDocument(
+        doc_id=f'{result.repo_info.repo_model.full_name}::class_summary::{summary.source_path}::{summary.qualified_name}',
+        repo_id=result.repo_info.repo_model.full_name,
+        doc_type='class_summary',
+        title=f'{result.repo_info.repo_model.full_name}::{summary.qualified_name} 类摘要',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
 def _build_common_metadata(result: AnalysisRunResult) -> dict[str, str | int | float | bool | list[str]]:
     """构建所有知识文档都会复用的一组基础元数据。"""
     repo = result.repo_info.repo_model
@@ -339,6 +532,16 @@ def _build_common_metadata(result: AnalysisRunResult) -> dict[str, str | int | f
         'subproject_markers': _collect_all_subproject_markers(result),
         'code_symbol_names': _collect_repo_code_symbol_names(result),
         'module_relation_targets': _collect_repo_module_targets(result),
+        'code_entity_names': _collect_repo_code_entity_names(result),
+        'code_entity_kinds': _collect_repo_code_entity_kinds(result),
+        'code_entity_refs': _collect_repo_code_entity_refs(result),
+        'code_relation_sources': _collect_repo_code_relation_sources(result),
+        'code_relation_targets': _collect_repo_code_relation_targets(result),
+        'code_relation_types': _collect_repo_code_relation_types(result),
+        'api_route_paths': _collect_repo_api_route_paths(result),
+        'api_handler_names': _collect_repo_api_handler_names(result),
+        'function_names': _collect_repo_function_names(result),
+        'class_names': _collect_repo_class_names(result),
         'topics': repo.topics,
         'stars': repo.stargazers_count,
     }
@@ -365,6 +568,16 @@ def _build_file_structure_metadata(
         for item in result.project_profile.code_symbols
         if item.source_path == source_path and item.line_number is not None
     ]
+    code_entities = [
+        _format_code_entity_text(item.entity_kind, item.name, item.qualified_name, item.location)
+        for item in result.project_profile.code_entities
+        if item.source_path == source_path
+    ]
+    code_relation_edges = [
+        _format_code_relation_edge_text(item.source_ref, item.target_ref, item.relation_type, item.line_number)
+        for item in result.project_profile.code_relation_edges
+        if item.source_path == source_path
+    ]
     return {
         'subproject_root': subproject_root or '',
         'subproject_markers': subproject_markers,
@@ -372,6 +585,28 @@ def _build_file_structure_metadata(
         'code_symbol_names': [item.name for item in result.project_profile.code_symbols if item.source_path == source_path],
         'module_relations': module_relations,
         'module_relation_targets': [item.target for item in result.project_profile.module_relations if item.source_path == source_path],
+        'code_entities': code_entities,
+        'code_entity_names': [item.name for item in result.project_profile.code_entities if item.source_path == source_path],
+        'code_entity_kinds': [item.entity_kind for item in result.project_profile.code_entities if item.source_path == source_path],
+        'code_entity_refs': [
+            item.qualified_name or item.name
+            for item in result.project_profile.code_entities
+            if item.source_path == source_path
+        ],
+        'code_relation_edges': code_relation_edges,
+        'code_relation_sources': [
+            item.source_ref for item in result.project_profile.code_relation_edges if item.source_path == source_path
+        ],
+        'code_relation_targets': [
+            item.target_ref for item in result.project_profile.code_relation_edges if item.source_path == source_path
+        ],
+        'code_relation_types': [
+            item.relation_type for item in result.project_profile.code_relation_edges if item.source_path == source_path
+        ],
+        'api_route_paths': [item.route_path for item in result.project_profile.api_route_summaries if item.source_path == source_path],
+        'api_handler_names': [item.handler_qualified_name for item in result.project_profile.api_route_summaries if item.source_path == source_path],
+        'function_names': [item.qualified_name for item in result.project_profile.function_summaries if item.source_path == source_path],
+        'class_names': [item.qualified_name for item in result.project_profile.class_summaries if item.source_path == source_path],
         'evidence_locations': evidence_locations[:12],
     }
 
@@ -415,9 +650,101 @@ def _collect_repo_code_symbol_names(result: AnalysisRunResult) -> list[str]:
     return _unique_keep_order([item.name for item in result.project_profile.code_symbols])[:30]
 
 
+def _collect_repo_function_names(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级函数限定名，便于代码实现类问题检索。"""
+    return _unique_keep_order([item.qualified_name for item in result.project_profile.function_summaries])[:40]
+
+
+def _collect_repo_api_route_paths(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级路由路径，便于接口问题检索。"""
+    return _unique_keep_order([item.route_path for item in result.project_profile.api_route_summaries])[:40]
+
+
+def _collect_repo_api_handler_names(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级接口处理函数，便于接口问题检索。"""
+    return _unique_keep_order([item.handler_qualified_name for item in result.project_profile.api_route_summaries])[:40]
+
+
+def _collect_repo_class_names(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级类限定名，便于职责与实现类问题检索。"""
+    return _unique_keep_order([item.qualified_name for item in result.project_profile.class_summaries])[:30]
+
+
 def _collect_repo_module_targets(result: AnalysisRunResult) -> list[str]:
     """汇总仓库级模块依赖目标，便于架构和技术栈检索。"""
     return _unique_keep_order([item.target for item in result.project_profile.module_relations])[:30]
+
+
+def _collect_repo_code_entity_names(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级统一代码实体名称。"""
+    return _unique_keep_order([item.name for item in result.project_profile.code_entities])[:40]
+
+
+def _collect_repo_code_entity_kinds(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级统一代码实体类型。"""
+    return _unique_keep_order([item.entity_kind for item in result.project_profile.code_entities])[:20]
+
+
+def _collect_repo_code_entity_refs(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级统一代码实体引用名。"""
+    return _unique_keep_order(
+        [item.qualified_name or item.name for item in result.project_profile.code_entities]
+    )[:50]
+
+
+def _collect_repo_code_relation_sources(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级统一关系边源引用。"""
+    return _unique_keep_order([item.source_ref for item in result.project_profile.code_relation_edges])[:50]
+
+
+def _collect_repo_code_relation_targets(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级统一关系边目标引用。"""
+    return _unique_keep_order([item.target_ref for item in result.project_profile.code_relation_edges])[:50]
+
+
+def _collect_repo_code_relation_types(result: AnalysisRunResult) -> list[str]:
+    """汇总仓库级统一关系边类型。"""
+    return _unique_keep_order([item.relation_type for item in result.project_profile.code_relation_edges])[:20]
+
+
+
+
+def _build_relation_metadata(
+    relation_edges: list[tuple[str, str, str]],
+) -> dict[str, list[str]]:
+    """把关系边压平成对齐的 metadata 数组，便于后续还原成图结构。"""
+    return {
+        'code_relation_sources': [source_ref for source_ref, _, _ in relation_edges],
+        'code_relation_targets': [target_ref for _, target_ref, _ in relation_edges],
+        'code_relation_types': [relation_type for _, _, relation_type in relation_edges],
+    }
+
+
+def _resolve_class_method_refs(
+    summary: ClassSummary,
+    result: AnalysisRunResult,
+) -> list[str]:
+    """把类中的方法名映射为限定名，方便统一关系追踪。"""
+    method_refs: list[str] = []
+    for item in result.project_profile.function_summaries:
+        if item.source_path != summary.source_path:
+            continue
+        if item.owner_class not in {summary.name, summary.qualified_name}:
+            continue
+        method_refs.append(item.qualified_name)
+
+    if len(method_refs) < len(summary.methods):
+        for method_name in summary.methods:
+            matched_ref = next(
+                (
+                    item.qualified_name
+                    for item in result.project_profile.function_summaries
+                    if item.source_path == summary.source_path and item.name == method_name
+                ),
+                f'{summary.qualified_name}.{method_name}',
+            )
+            method_refs.append(matched_ref)
+    return _unique_keep_order(method_refs)
 
 
 def _extract_names_from_formatted_items(items: list[str]) -> list[str]:
@@ -447,11 +774,48 @@ def _format_symbol_text(name: str, symbol_type: str, line_number: int | None) ->
     return f'{symbol_type} {name} @L{line_number}'
 
 
+def _format_line_range(line_start: int | None, line_end: int | None) -> str:
+    """把起止行号格式化成更适合展示的文本。"""
+    if line_start is None and line_end is None:
+        return '未知'
+    if line_start is None:
+        return f'L{line_end}'
+    if line_end is None or line_end == line_start:
+        return f'L{line_start}'
+    return f'L{line_start}-L{line_end}'
+
+
 def _format_relation_text(target: str, relation_type: str, line_number: int | None) -> str:
     """把模块依赖关系格式化为简洁的结构化文本。"""
     if line_number is None:
         return f'{relation_type} {target}'
     return f'{relation_type} {target} @L{line_number}'
+
+
+def _format_code_entity_text(
+    entity_kind: str,
+    name: str,
+    qualified_name: str | None,
+    location: str | None,
+) -> str:
+    """把统一代码实体格式化为简洁文本。"""
+    ref = qualified_name or name
+    if location:
+        return f'{entity_kind} {ref} @{location}'
+    return f'{entity_kind} {ref}'
+
+
+def _format_code_relation_edge_text(
+    source_ref: str,
+    target_ref: str,
+    relation_type: str,
+    line_number: int | None,
+) -> str:
+    """把统一代码关系边格式化为简洁文本。"""
+    text = f'{relation_type} {source_ref} -> {target_ref}'
+    if line_number is not None:
+        return f'{text} @L{line_number}'
+    return text
 
 
 def _unique_keep_order(items: list[str]) -> list[str]:

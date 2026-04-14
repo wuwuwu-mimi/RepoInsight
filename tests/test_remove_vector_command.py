@@ -31,6 +31,7 @@ def test_remove_command_deletes_artifacts_by_default() -> None:
     original_remove_cloned_repo = cli_main.remove_cloned_repo
     original_remove_markdown_report = cli_main.remove_markdown_report
     original_remove_json_report = cli_main.remove_json_report
+    original_remove_pdf_report = cli_main.remove_pdf_report
     original_remove_llm_context_text = cli_main.remove_llm_context_text
     original_remove_indexed_repo = cli_main.remove_indexed_repo
     calls: list[str] = []
@@ -38,6 +39,7 @@ def test_remove_command_deletes_artifacts_by_default() -> None:
         cli_main.remove_cloned_repo = lambda repo_id: calls.append(f'clone:{repo_id}') or True
         cli_main.remove_markdown_report = lambda repo_id, output_dir='reports': calls.append(f'md:{repo_id}:{output_dir}') or True
         cli_main.remove_json_report = lambda repo_id, output_dir='reports': calls.append(f'json:{repo_id}:{output_dir}') or True
+        cli_main.remove_pdf_report = lambda repo_id, output_dir='reports': calls.append(f'pdf:{repo_id}:{output_dir}') or True
         cli_main.remove_llm_context_text = lambda repo_id, output_dir='reports': calls.append(f'llm:{repo_id}:{output_dir}') or True
         cli_main.remove_indexed_repo = lambda repo_id: calls.append(f'knowledge:{repo_id}') or True
 
@@ -52,6 +54,7 @@ def test_remove_command_deletes_artifacts_by_default() -> None:
             'clone:demo/sample',
             'md:demo/sample:reports',
             'json:demo/sample:reports',
+            'pdf:demo/sample:reports',
             'llm:demo/sample:reports',
             'knowledge:demo/sample',
         ]
@@ -59,5 +62,6 @@ def test_remove_command_deletes_artifacts_by_default() -> None:
         cli_main.remove_cloned_repo = original_remove_cloned_repo
         cli_main.remove_markdown_report = original_remove_markdown_report
         cli_main.remove_json_report = original_remove_json_report
+        cli_main.remove_pdf_report = original_remove_pdf_report
         cli_main.remove_llm_context_text = original_remove_llm_context_text
         cli_main.remove_indexed_repo = original_remove_indexed_repo

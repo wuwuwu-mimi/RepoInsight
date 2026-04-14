@@ -103,6 +103,37 @@ def generate_markdown_report(result: AnalysisRunResult) -> str:
     else:
         lines.extend(['', '### 模块依赖', '- 未抽取到模块依赖'])
 
+    if profile.function_summaries:
+        lines.extend(['', '### 函数级摘要'])
+        for item in profile.function_summaries[:20]:
+            lines.append(
+                f'- `{item.source_path}` · `{item.qualified_name}`'
+                f'（{_format_line_range(item.line_start, item.line_end)}）：{item.summary}'
+            )
+    else:
+        lines.extend(['', '### 函数级摘要', '- 未抽取到函数级摘要'])
+
+    if profile.class_summaries:
+        lines.extend(['', '### 类级摘要'])
+        for item in profile.class_summaries[:12]:
+            lines.append(
+                f'- `{item.source_path}` · `{item.qualified_name}`'
+                f'（{_format_line_range(item.line_start, item.line_end)}）：{item.summary}'
+            )
+    else:
+        lines.extend(['', '### 类级摘要', '- 未抽取到类级摘要'])
+
+    if profile.api_route_summaries:
+        lines.extend(['', '### 接口级摘要'])
+        for item in profile.api_route_summaries[:20]:
+            methods = '/'.join(item.http_methods) if item.http_methods else 'HTTP'
+            lines.append(
+                f'- `{item.source_path}` -> `{methods} {item.route_path}`'
+                f'{_format_line_suffix(item.line_number)}：{item.summary}'
+            )
+    else:
+        lines.extend(['', '### 接口级摘要', '- 未抽取到接口级摘要'])
+
     lines.extend(['', '## 6. 技术栈推断'])
     if result.tech_stack:
         for item in result.tech_stack:
@@ -229,6 +260,17 @@ def _get_file_relation_lines(result: AnalysisRunResult, source_path: str) -> lis
             continue
         items.append(f'{relation.relation_type} {relation.target}{_format_line_suffix(relation.line_number)}')
     return items[:8]
+
+
+def _format_line_range(line_start: int | None, line_end: int | None) -> str:
+    """把起止行号格式化成更适合摘要展示的文本。"""
+    if line_start is None and line_end is None:
+        return '未知'
+    if line_start is None:
+        return f'L{line_end}'
+    if line_end is None or line_end == line_start:
+        return f'L{line_start}'
+    return f'L{line_start}-L{line_end}'
 
 
 def _format_line_suffix(line_number: int | None) -> str:

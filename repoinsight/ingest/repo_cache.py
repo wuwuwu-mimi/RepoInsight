@@ -7,6 +7,7 @@ from pathlib import Path
 
 from repoinsight.models.cache_model import CachedRepoEntry, CachedRepoListResult
 from repoinsight.report.markdown_report import get_report_path
+from repoinsight.report.pdf_report import get_pdf_report_path
 
 
 # clone 缓存固定存放在项目根目录下的 clone 目录。
@@ -69,8 +70,21 @@ def list_cloned_repos(target_dir: str = DEFAULT_CLONE_DIR) -> CachedRepoListResu
     for repo_id in sorted(repo_assets.keys(), key=str.lower):
         owner, repo = parse_repo_id(repo_id)
         assets = repo_assets[repo_id]
-        report_path = get_report_path(repo_id)
+        markdown_report_path = get_report_path(repo_id)
+        pdf_report_path = get_pdf_report_path(repo_id)
         has_markdown_report = assets['has_markdown_report']
+        has_pdf_report = assets['has_pdf_report']
+        has_report = bool(
+            has_markdown_report
+            or assets['has_json_report']
+            or has_pdf_report
+            or assets['has_llm_context']
+        )
+        report_path = None
+        if has_markdown_report:
+            report_path = str(markdown_report_path)
+        elif has_pdf_report:
+            report_path = str(pdf_report_path)
         repos.append(
             CachedRepoEntry(
                 repo_id=repo_id,
@@ -81,10 +95,11 @@ def list_cloned_repos(target_dir: str = DEFAULT_CLONE_DIR) -> CachedRepoListResu
                 is_git_repo=assets['is_git_repo'],
                 last_modified=assets['last_modified'],
                 size_bytes=assets['size_bytes'],
-                has_report=has_markdown_report,
-                report_path=str(report_path) if has_markdown_report else None,
+                has_report=has_report,
+                report_path=report_path,
                 has_markdown_report=has_markdown_report,
                 has_json_report=assets['has_json_report'],
+                has_pdf_report=has_pdf_report,
                 has_llm_context=assets['has_llm_context'],
                 has_knowledge=assets['has_knowledge'],
                 has_vector_index=assets['has_vector_index'],
@@ -180,6 +195,8 @@ def _collect_repo_assets(clone_root: Path) -> dict[str, dict[str, object]]:
                 asset['has_markdown_report'] = True
             elif file_path.suffix == '.json':
                 asset['has_json_report'] = True
+            elif file_path.suffix == '.pdf':
+                asset['has_pdf_report'] = True
             elif suffixes[-2:] == ['.llm', '.txt'] or file_path.name.endswith('.llm.txt'):
                 asset['has_llm_context'] = True
 
@@ -220,6 +237,7 @@ def _get_or_create_repo_asset(
             'size_bytes': None,
             'has_markdown_report': False,
             'has_json_report': False,
+            'has_pdf_report': False,
             'has_llm_context': False,
             'has_knowledge': False,
             'has_vector_index': False,
@@ -230,7 +248,7 @@ def _get_or_create_repo_asset(
 def _parse_repo_id_from_report_name(file_name: str) -> str | None:
     """从报告文件名中恢复 owner/repo。"""
     base_name = file_name
-    for suffix in ('.llm.txt', '.json', '.md'):
+    for suffix in ('.llm.txt', '.pdf', '.json', '.md'):
         if base_name.endswith(suffix):
             base_name = base_name[:-len(suffix)]
             break
@@ -263,6 +281,7 @@ def _build_asset_status(assets: dict[str, object]) -> str:
     has_reports = bool(
         assets.get('has_markdown_report')
         or assets.get('has_json_report')
+        or assets.get('has_pdf_report')
         or assets.get('has_llm_context')
     )
     has_knowledge = bool(assets.get('has_knowledge'))

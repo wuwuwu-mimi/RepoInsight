@@ -20,6 +20,7 @@ def test_list_cloned_repos_includes_artifact_and_vector_statuses() -> None:
 
         (report_root / 'demo__sample.md').write_text('# sample\n', encoding='utf-8')
         (report_root / 'demo__sample.json').write_text('{}\n', encoding='utf-8')
+        (report_root / 'demo__sample.pdf').write_bytes(b'%PDF-1.4\n')
         (report_root / 'demo__sample.llm.txt').write_text('context\n', encoding='utf-8')
         (knowledge_root / 'demo' / 'sample.json').write_text(
             json.dumps({'repo_id': 'demo/sample', 'documents': []}, ensure_ascii=False),
@@ -46,6 +47,7 @@ def test_list_cloned_repos_includes_artifact_and_vector_statuses() -> None:
             assert sample.is_git_repo is True
             assert sample.has_markdown_report is True
             assert sample.has_json_report is True
+            assert sample.has_pdf_report is True
             assert sample.has_llm_context is True
             assert sample.has_knowledge is True
             assert sample.has_vector_index is True
@@ -83,6 +85,7 @@ def test_cleanup_orphans_command_removes_orphan_assets() -> None:
         has_report=False,
         has_markdown_report=True,
         has_json_report=True,
+        has_pdf_report=True,
         has_llm_context=True,
         has_knowledge=True,
         has_vector_index=True,
@@ -98,6 +101,7 @@ def test_cleanup_orphans_command_removes_orphan_assets() -> None:
         has_report=True,
         has_markdown_report=True,
         has_json_report=True,
+        has_pdf_report=True,
         has_llm_context=True,
         has_knowledge=True,
         has_vector_index=True,
@@ -107,6 +111,7 @@ def test_cleanup_orphans_command_removes_orphan_assets() -> None:
     original_list_cloned_repos = cli_main.list_cloned_repos
     original_remove_markdown_report = cli_main.remove_markdown_report
     original_remove_json_report = cli_main.remove_json_report
+    original_remove_pdf_report = cli_main.remove_pdf_report
     original_remove_llm_context_text = cli_main.remove_llm_context_text
     original_remove_indexed_repo = cli_main.remove_indexed_repo
     calls: list[str] = []
@@ -118,6 +123,7 @@ def test_cleanup_orphans_command_removes_orphan_assets() -> None:
         )
         cli_main.remove_markdown_report = lambda repo_id, output_dir='reports': calls.append(f'md:{repo_id}') or True
         cli_main.remove_json_report = lambda repo_id, output_dir='reports': calls.append(f'json:{repo_id}') or True
+        cli_main.remove_pdf_report = lambda repo_id, output_dir='reports': calls.append(f'pdf:{repo_id}') or True
         cli_main.remove_llm_context_text = lambda repo_id, output_dir='reports': calls.append(f'llm:{repo_id}') or True
         cli_main.remove_indexed_repo = lambda repo_id: calls.append(f'knowledge:{repo_id}') or True
 
@@ -131,6 +137,7 @@ def test_cleanup_orphans_command_removes_orphan_assets() -> None:
         assert calls == [
             'md:ghost/repo',
             'json:ghost/repo',
+            'pdf:ghost/repo',
             'llm:ghost/repo',
             'knowledge:ghost/repo',
         ]
@@ -138,5 +145,6 @@ def test_cleanup_orphans_command_removes_orphan_assets() -> None:
         cli_main.list_cloned_repos = original_list_cloned_repos
         cli_main.remove_markdown_report = original_remove_markdown_report
         cli_main.remove_json_report = original_remove_json_report
+        cli_main.remove_pdf_report = original_remove_pdf_report
         cli_main.remove_llm_context_text = original_remove_llm_context_text
         cli_main.remove_indexed_repo = original_remove_indexed_repo

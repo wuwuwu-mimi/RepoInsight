@@ -73,6 +73,39 @@ def build_llm_context_payload(
                 }
                 for item in profile.module_relations
             ],
+            'function_summaries': [
+                {
+                    'qualified_name': item.qualified_name,
+                    'source_path': item.source_path,
+                    'signature': item.signature,
+                    'owner_class': item.owner_class,
+                    'called_symbols': item.called_symbols,
+                    'summary': item.summary,
+                }
+                for item in profile.function_summaries[:40]
+            ],
+            'class_summaries': [
+                {
+                    'qualified_name': item.qualified_name,
+                    'source_path': item.source_path,
+                    'bases': item.bases,
+                    'methods': item.methods,
+                    'summary': item.summary,
+                }
+                for item in profile.class_summaries[:20]
+            ],
+            'api_route_summaries': [
+                {
+                    'route_path': item.route_path,
+                    'http_methods': item.http_methods,
+                    'source_path': item.source_path,
+                    'framework': item.framework,
+                    'handler_qualified_name': item.handler_qualified_name,
+                    'called_symbols': item.called_symbols,
+                    'summary': item.summary,
+                }
+                for item in profile.api_route_summaries[:30]
+            ],
         },
         'current_rule_analysis': {
             'project_type': result.project_type,
@@ -123,6 +156,9 @@ def build_llm_context_text(
     scan_summary = payload['scan_summary']
     tech_stack_signals = payload['tech_stack_signals']
     key_file_snippets = payload['key_file_snippets']
+    function_summaries = project_profile['function_summaries']
+    class_summaries = project_profile['class_summaries']
+    api_route_summaries = project_profile['api_route_summaries']
 
     lines: list[str] = [
         '你将基于以下仓库结构化上下文继续做高层分析。',
@@ -152,6 +188,9 @@ def build_llm_context_text(
         f"- subprojects: {_join_or_none([item['root_path'] for item in project_profile['subprojects']])}",
         f"- code_symbols: {_join_or_none([item['name'] for item in project_profile['code_symbols'][:20]])}",
         f"- module_relations: {_join_or_none([item['target'] for item in project_profile['module_relations'][:20]])}",
+        f"- function_summaries: {_join_or_none([item['qualified_name'] for item in project_profile['function_summaries'][:20]])}",
+        f"- class_summaries: {_join_or_none([item['qualified_name'] for item in project_profile['class_summaries'][:20]])}",
+        f"- api_route_summaries: {_join_or_none([item['route_path'] for item in project_profile['api_route_summaries'][:20]])}",
         '',
         '[当前规则分析]',
         f"- project_type: {rule_analysis['project_type'] or '暂未明确识别'}",
@@ -177,6 +216,16 @@ def build_llm_context_text(
                 f"{item['evidence']}"
             )
     else:
+        lines.append('- 无')
+
+    lines.extend(['', '[代码级摘要]'])
+    if function_summaries:
+        for item in function_summaries[:12]:
+            lines.append(f"- 函数 {item['qualified_name']} | {item['source_path']} | {item['summary']}")
+    if class_summaries:
+        for item in class_summaries[:8]:
+            lines.append(f"- 类 {item['qualified_name']} | {item['source_path']} | {item['summary']}")
+    if not function_summaries and not class_summaries:
         lines.append('- 无')
 
     lines.extend(['', '[关键文件片段]'])

@@ -23,7 +23,10 @@ def index_documents_to_chroma(
 
     collection = _get_collection(target_dir=target_dir, collection_name=collection_name)
     embedding_service = get_embedding_service()
-    embeddings = embedding_service.embed_texts([item.content for item in documents])
+    embeddings = embedding_service.embed_texts([
+        _build_embedding_text(item)
+        for item in documents
+    ])
 
     collection.upsert(
         ids=[item.doc_id for item in documents],
@@ -37,6 +40,7 @@ def index_documents_to_chroma(
 def search_documents_in_chroma(
     query: str,
     top_k: int = 5,
+    repo_id: str | None = None,
     target_dir: str = DEFAULT_CHROMA_DIR,
     collection_name: str = DEFAULT_COLLECTION_NAME,
 ) -> list[SearchHit]:
@@ -47,11 +51,15 @@ def search_documents_in_chroma(
 
     embedding_service = get_embedding_service()
     query_embedding = embedding_service.embed_texts([query])[0]
-    raw_result = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=top_k,
-        include=['documents', 'metadatas', 'distances'],
-    )
+    query_kwargs = {
+        'query_embeddings': [query_embedding],
+        'n_results': top_k,
+        'include': ['documents', 'metadatas', 'distances'],
+    }
+    if repo_id:
+        query_kwargs['where'] = {'repo_id': repo_id}
+
+    raw_result = collection.query(**query_kwargs)
     return _build_search_hits(query=query, raw_result=raw_result)
 
 
@@ -85,6 +93,15 @@ def list_repo_ids_in_chroma(
         if repo_id:
             repo_ids.add(repo_id)
     return repo_ids
+
+
+def get_chroma_document_count(
+    target_dir: str = DEFAULT_CHROMA_DIR,
+    collection_name: str = DEFAULT_COLLECTION_NAME,
+) -> int:
+    """返回当前 Chroma collection 中的文档总数。"""
+    collection = _get_collection(target_dir=target_dir, collection_name=collection_name)
+    return int(collection.count())
 
 
 def is_chroma_runtime_available() -> bool:
@@ -132,6 +149,58 @@ def _serialize_metadata(document: KnowledgeDocument) -> dict[str, str | int | fl
         'topics_text': _join_metadata_list(document.metadata.get('topics')),
         'metadata_json': metadata_json,
     }
+
+
+def _build_embedding_text(document: KnowledgeDocument) -> str:
+    """把标题、类型、路径、元数据和正文拼成更适合向量化的文本。"""
+    metadata = document.metadata
+    parts = [
+        f'标题: {document.title}',
+        f'类型: {document.doc_type}',
+        f'仓库: {document.repo_id}',
+    ]
+    if document.source_path:
+        parts.append(f'路径: {document.source_path}')
+
+    important_metadata = {
+        'project_type': metadata.get('project_type'),
+        'primary_language': metadata.get('primary_language'),
+        'languages': metadata.get('languages'),
+        'frameworks': metadata.get('frameworks'),
+        'runtimes': metadata.get('runtimes'),
+        'build_tools': metadata.get('build_tools'),
+        'package_managers': metadata.get('package_managers'),
+        'entrypoints': metadata.get('entrypoints'),
+        'subproject_root': metadata.get('subproject_root'),
+        'subproject_roots': metadata.get('subproject_roots'),
+        'code_symbol_names': metadata.get('code_symbol_names'),
+        'module_relation_targets': metadata.get('module_relation_targets'),
+        'api_route_paths': metadata.get('api_route_paths'),
+        'api_handler_names': metadata.get('api_handler_names'),
+        'function_names': metadata.get('function_names'),
+        'class_names': metadata.get('class_names'),
+        'route_path': metadata.get('route_path'),
+        'http_methods': metadata.get('http_methods'),
+        'handler_name': metadata.get('handler_name'),
+        'handler_qualified_name': metadata.get('handler_qualified_name'),
+        'symbol_name': metadata.get('symbol_name'),
+        'qualified_name': metadata.get('qualified_name'),
+        'owner_class': metadata.get('owner_class'),
+        'called_symbols': metadata.get('called_symbols'),
+        'class_methods': metadata.get('class_methods'),
+        'signature': metadata.get('signature'),
+        'config_env_vars': metadata.get('config_env_vars'),
+        'config_scripts_or_commands': metadata.get('config_scripts_or_commands'),
+        'entrypoint_startup_commands': metadata.get('entrypoint_startup_commands'),
+    }
+    for key, value in important_metadata.items():
+        text = _join_metadata_list(value)
+        if text:
+            parts.append(f'{key}: {text}')
+
+    parts.append('正文:')
+    parts.append(document.content)
+    return '\n'.join(parts)
 
 
 def _build_search_hits(query: str, raw_result: dict) -> list[SearchHit]:
@@ -214,6 +283,8 @@ def _build_snippet(content: str, query: str, max_chars: int = 180) -> str:
 
 def _join_metadata_list(value: object) -> str:
     """把 metadata 中的列表值压平为字符串，便于 Chroma 过滤和展示。"""
-    if not isinstance(value, list):
+    if value is None:
         return ''
-    return ', '.join(str(item) for item in value)
+    if isinstance(value, list):
+        return ', '.join(str(item) for item in value)
+    return str(value)
