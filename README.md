@@ -1,72 +1,420 @@
+<div align="center">
 
-# RepoInsight Agent
+# RepoInsight
 
-**一个开源的 GitHub 项目智能分析 Agent**：输入任意 GitHub 仓库 URL，即可自动拉取、结构化分析、生成专业报告，并将分析结果持久化存储到向量数据库中，形成你的「个人开源项目知识库」。支持跨多个仓库的语义搜索和问答。
+### 面向 GitHub 仓库的本地分析、检索与问答工具
 
-**一句话亮点**：不是一次性分析工具，而是帮开发者构建持久、可检索的开源项目「第二大脑」。
+输入仓库 URL，自动完成仓库采集、代码分析、结构化报告生成、知识入库与后续问答。
 
+![Python](https://img.shields.io/badge/Python-3.14%2B-blue)
+![Status](https://img.shields.io/badge/status-MVP%20available-green)
+![CLI](https://img.shields.io/badge/interface-CLI-orange)
+![RAG](https://img.shields.io/badge/RAG-local%20first-purple)
+![LangGraph](https://img.shields.io/badge/orchestrator-local%20%7C%20langgraph-black)
 
-## ✨ 核心功能
+</div>
 
-- **一键分析**：输入 GitHub URL → 自动克隆（浅克隆）、解析结构、提取元数据、分析代码
-- **多维度报告**：项目概述、技术栈、架构图、优势/劣势、潜在风险、贡献建议等（Markdown + JSON）
-- **持久化存储**：分析报告 + 代码片段自动嵌入，向量数据库，支持长期记忆
-- **语义搜索**：跨所有已分析仓库提问，例如「哪个项目用了 GraphRAG？」或「对比这几个 RAG 项目的技术选型」
-- **导出**：Markdown、PDF、JSON 报告
-- **本地优先**：支持 Ollama / DeepSeek / Qwen 等本地模型，完全离线运行
+---
 
-## 🚀 为什么要做这个项目（Motivation）
+## 为什么是 RepoInsight
 
-开发者每天刷 GitHub，但分析完 10 个 repo 后就全忘了。现有工具大多只做一次性分析或文档生成，缺少**持久化 + 跨项目 RAG** 能力。
+很多 GitHub 仓库你分析过一次，过几天就忘了。  
+RepoInsight 想解决的是：
 
-本项目填补这个空白：让分析结果变成可积累、可检索的知识资产。
+- 不是只做“一次性分析”
+- 而是把分析结果沉淀为“可检索、可复用、可继续问答”的本地知识资产
 
+它更像你的一个「开源项目第二大脑」：
 
-### 核心框架
-- **Agent 编排**：LangGraph（推荐，状态机强大，支持多 Agent 协作、人机交互）
-- **LLM**：Ollama（本地）+ Qwen2.5 / DeepSeek-R1 / Grok（可选云端）
-- **向量数据库**：Chroma（MVP，最简单）→ Qdrant / LanceDB（生产）
-- **嵌入模型**：bge-m3（多语言强）或 sentence-transformers / text-embedding-3-large
+- 先 `analyze`
+- 再 `search`
+- 然后继续 `answer`
 
-### 数据获取与解析
-- GitHub API + PyGitHub（元数据、stars、issues）
-- gitpython（浅克隆，避免大仓库炸内存）
-- tree-sitter + py-tree-sitter（AST 解析，生成依赖图、代码结构）
-- 支持语言：Python、JavaScript/TypeScript、Java、Go 等（可扩展）
+---
 
-### 报告生成与处理
-- Pydantic（结构化输出）
-- Markdown + WeasyPrint / ReportLab（PDF 导出）
-- LangChain
+截至 2026-04-17，本地最近一次全量测试结果：
 
+- `python -B -m pytest -q`
+- `122 passed, 1 warning`
 
-### 观测与评估
-- Langfuse / LangSmith（tracing）
-- RAGAS（评估检索质量）
-- 自定义指标（报告完整性、事实准确性）
+当前可用性判断：
 
-### 其他
-- Docker 支持（一键部署）
-- Poetry / uv（依赖管理）
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 仓库分析 `analyze` | 可用 | 主链路稳定 |
+| 本地知识库 / 向量索引 | 可用 | 支持 Chroma + 本地回退 |
+| 检索 `search` | 可用 | 跨已分析仓库搜索 |
+| 单仓库问答 `answer` | 可用 | 支持抽取式与 LLM 增强 |
+| 代码级问答 | 可用 | 已支持函数 / 类 / 路由 / 关系链 |
+| 多 Agent 编排 | 可用 | `local` 与 `langgraph` 双路线 |
+| Web UI | 未开始 | 暂无正式前端 |
+| GraphRAG | 未开始 | 后续方向 |
 
-## 📁 项目架构
+---
 
-**核心 Workflow（LangGraph）**：
-1. 输入 URL → Metadata Agent
-2. 浅克隆 + Structure Agent（tree + 文件过滤，跳过 node_modules、.git 等）
-3. Code Analysis Agent（AST + 关键文件总结）
-4. Insight Agent（LLM 生成报告）
-5. Report Agent（格式化 + 入库）
-6. Human-in-the-loop（可选：用户确认/修正）
+## 核心能力
 
-## 使用示例
+### 1. 仓库分析
+
+- GitHub 公共仓库元数据获取
+- README 获取
+- 本地克隆与缓存
+- 文件扫描、关键文件识别、目录树预览
+- 项目画像、技术栈、项目类型、优势 / 风险分析
+- Markdown / JSON / LLM 上下文 / PDF 报告输出
+
+### 2. RAG 与知识库存储
+
+- 本地知识文档落盘
+- Chroma 向量索引
+- 本地轻量检索回退
+- 向量索引健康检查、重建、孤儿清理
+
+### 3. 问答
+
+- `search`：跨已分析仓库搜索
+- `answer`：针对单仓库问答
+- 支持 `--no-llm`
+- 支持流式输出 / JSON 输出
+- 支持代码实现类问题的代码级证据追踪
+
+### 4. 多 Agent 编排
+
+- `answer` 侧：多 Agent 已较完整
+- `analyze` 侧：已有 `planner_agent`、动态任务裁剪、任务卡片、并行波次雏形
+- 支持 `local` / `langgraph` 双编排器
+
+### 5. 本地模型支持
+
+- Embedding：`service` / `ollama` / `sentence-transformers`
+- LLM：兼容服务商 API，也支持本地 Ollama
+
+---
+
+## 当前最成熟的语言支持
+
+目前做得最完整的是：
+
+- Python
+- JavaScript / TypeScript
+
+其他方向已预留基础识别与扩展入口：
+
+- Go
+- Java
+- Rust
+- PHP
+- Ruby
+- C#
+
+---
+
+## 安装
+
+### 环境要求
+
+- Python `>= 3.14`
+
+### 推荐安装方式
+
 ```bash
-# 分析一个项目
-[x]repoinsight analyze https://github.com/langchain-ai/langgraph --model qwen2.5
-
-# 搜索跨项目知识
-[]repoinsight search "哪个项目在用 ColPali 做多模态 RAG"
-
-# 导出 PDF
-[]repoinsight export --report-id xxx --format pdf
+python -m venv .venv
+.venv\\Scripts\\activate
+pip install -e .
 ```
+
+如果你使用 `uv`，也可以按自己的习惯安装。
+
+---
+
+## 配置
+
+先复制环境变量模板：
+
+```bash
+copy .env.example .env
+```
+
+### 常用配置项
+
+#### Embedding
+
+- `REPOINSIGHT_EMBEDDING_PROVIDER`
+- `REPOINSIGHT_EMBEDDING_MODEL`
+- `REPOINSIGHT_EMBEDDING_BASE_URL`
+- `REPOINSIGHT_EMBEDDING_API_KEY`
+
+#### LLM
+
+- `REPOINSIGHT_LLM_PROVIDER`
+- `REPOINSIGHT_LLM_MODEL`
+- `REPOINSIGHT_LLM_BASE_URL`
+- `REPOINSIGHT_LLM_API_KEY`
+
+### Ollama 示例
+
+```env
+REPOINSIGHT_LLM_PROVIDER=ollama
+REPOINSIGHT_LLM_MODEL=qwen2.5:7b
+REPOINSIGHT_LLM_BASE_URL=http://127.0.0.1:11434
+REPOINSIGHT_LLM_API_KEY=ollama
+```
+
+---
+
+## 快速开始
+
+### 1) 分析一个仓库
+
+```bash
+python main.py analyze https://github.com/langchain-ai/langgraph
+```
+
+可选用法：
+
+```bash
+python main.py analyze https://github.com/langchain-ai/langgraph --orchestrator local
+python main.py analyze https://github.com/langchain-ai/langgraph --orchestrator langgraph
+python main.py analyze https://github.com/langchain-ai/langgraph --embedding-mode ollama
+python main.py analyze https://github.com/langchain-ai/langgraph --no-save-report
+```
+
+### 2) 搜索已分析知识
+
+```bash
+python main.py search "哪些项目用了 FastAPI"
+```
+
+### 3) 针对单仓库提问
+
+```bash
+python main.py answer langchain-ai/langgraph "这个项目是做什么的？"
+```
+
+实现类问题示例：
+
+```bash
+python main.py answer langchain-ai/langgraph "路由注册是怎么实现的？" --no-llm
+```
+
+### 4) 管理本地知识库与向量索引
+
+```bash
+python main.py list
+python main.py remove langchain-ai/langgraph
+python main.py remove-vector langchain-ai/langgraph
+python main.py rebuild-vector
+python main.py vector-health
+python main.py embedding-health
+python main.py cleanup-orphans
+```
+
+### 5) 导出报告
+
+```bash
+python main.py export langchain-ai/langgraph --format pdf
+```
+
+---
+
+## 主要命令
+
+| 命令 | 说明 |
+|---|---|
+| `analyze` | 分析仓库并生成报告 |
+| `search` | 跨知识库搜索 |
+| `answer` | 针对单仓库问答 |
+| `list` | 列出已缓存仓库 |
+| `remove` | 删除本地仓库缓存，可选删除关联报告 |
+| `remove-vector` | 仅删除向量索引中的仓库数据 |
+| `rebuild-vector` | 从本地知识文档重建向量库 |
+| `vector-health` | 检查向量库状态 |
+| `embedding-health` | 检查 embedding 服务状态 |
+| `cleanup-orphans` | 清理孤儿报告 / 知识文档 / 向量索引 |
+| `export` | 导出报告 |
+| `version` | 查看版本 |
+
+---
+
+## 项目架构图
+
+### 总体架构
+
+```mermaid
+flowchart TB
+    U[用户 / 开发者]
+
+    U --> CLI[CLI 入口\nmain.py / repoinsight.cli.main]
+    U --> DOCS[文档\nREADME / docs]
+
+    CLI --> ANALYZE_CMD[analyze]
+    CLI --> SEARCH_CMD[search]
+    CLI --> ANSWER_CMD[answer]
+    CLI --> MANAGE_CMD[list / remove / export / rebuild-vector / health]
+
+    ANALYZE_CMD --> INGEST[采集层 ingest\nrepo_service / github_client / git_loader / file_scanner]
+    INGEST --> ANALYZE_PIPE[分析主链路 analyze.pipeline]
+    ANALYZE_PIPE --> STAGES[阶段执行\nanalysis_stages]
+    STAGES --> PROFILE[项目画像与规则分析\nproject_profile_inference\nstack_inference\ninsight_builder]
+    STAGES --> CODE_INDEX[代码索引分析\ncode_index_inference\npython_indexer\njavascript_indexer]
+    PROFILE --> ANALYSIS_RESULT[AnalysisRunResult]
+    CODE_INDEX --> ANALYSIS_RESULT
+
+    ANALYSIS_RESULT --> REPORT[报告输出 report\nmarkdown_report / json_report / pdf_report]
+    ANALYSIS_RESULT --> LLM_CTX[LLM 上下文构建\nllm.context_builder]
+    ANALYSIS_RESULT --> INDEX_SERVICE[知识入库 storage.index_service]
+
+    ANALYZE_CMD --> ANALYZE_ORCH[分析编排 agents.analysis_coordinator\n/ agents.langgraph_analysis]
+    ANALYZE_ORCH --> PLAN_A[planner_agent]
+    ANALYZE_ORCH --> A_AGENTS[repo/readme/structure/\ncodebase/profile/insight/\nverifier/memory]
+
+    INDEX_SERVICE --> DOC_BUILDER[文档构建\nstorage.document_builder\nsummary_builders]
+    DOC_BUILDER --> KNOWLEDGE[KnowledgeDocument]
+    KNOWLEDGE --> LOCAL_STORE[本地知识库\nlocal_knowledge_store]
+    KNOWLEDGE --> VECTOR_STORE[向量库\nchroma_store]
+    VECTOR_STORE --> EMBED[Embedding 服务\nembedding_service]
+
+    SEARCH_CMD --> SEARCH_SERVICE[检索层 search.service]
+    SEARCH_SERVICE --> VECTOR_STORE
+    SEARCH_SERVICE --> LOCAL_STORE
+    SEARCH_SERVICE --> SEARCH_RESULT[SearchResult / SearchHit]
+
+    ANSWER_CMD --> ANSWER_ORCH[问答编排\nanswer_coordinator / langgraph_answer]
+    ANSWER_ORCH --> ROUTER[router_agent]
+    ANSWER_ORCH --> RETRIEVAL[retrieval_agent]
+    ANSWER_ORCH --> CODE_AGENT[code_agent / architecture_agent]
+    ANSWER_ORCH --> SYNTHESIS[synthesis_agent]
+    ANSWER_ORCH --> VERIFY[verifier_agent]
+    ANSWER_ORCH --> RECOVERY[recovery_agent]
+    ANSWER_ORCH --> REVISION[revision_agent]
+
+    RETRIEVAL --> SEARCH_SERVICE
+    CODE_AGENT --> ANALYSIS_RESULT
+    CODE_AGENT --> LOCAL_STORE
+    SYNTHESIS --> ANSWER_SERVICE[answer.service / formatter]
+    ANSWER_SERVICE --> LLM_SERVICE[llm.service]
+    LLM_SERVICE --> LLM_CFG[llm.config]
+    ANSWER_SERVICE --> ANSWER_OUT[最终回答\nanswer / evidence / confidence]
+
+    ANALYSIS_RESULT --- MODELS[统一数据模型 models\nrepo_model / analysis_model /\nrag_model / answer_model / file_model]
+    SEARCH_RESULT --- MODELS
+    ANSWER_OUT --- MODELS
+```
+
+### 分层视图
+
+```mermaid
+flowchart LR
+    A[交互层\nCLI] --> B[编排层\nLocal Orchestrator / LangGraph]
+    B --> C[采集层\ningest]
+    B --> D[分析层\nanalyze]
+    B --> E[问答层\nsearch / answer / agents]
+    D --> F[报告层\nmarkdown / json / pdf]
+    D --> G[知识构建层\ndocument_builder / summary_builders]
+    G --> H[存储层\nlocal knowledge / chroma]
+    E --> H
+    E --> I[LLM 层\nllm.service / llm.config]
+    C --> J[统一模型层\nmodels]
+    D --> J
+    E --> J
+    H --> J
+```
+
+### 架构说明
+
+- 交互层：通过 CLI 触发 `analyze`、`search`、`answer` 和仓库管理命令
+- 编排层：支持本地编排和 LangGraph 编排，两套链路并存
+- 分析层：负责仓库采集、规则分析、代码索引、项目画像与报告生成
+- 存储层：负责本地知识文档和 Chroma 向量索引
+- 问答层：负责检索、代码调查、回答生成与多 Agent 校验
+- 模型层：统一承载 repo、analysis、rag、answer 等核心数据结构
+
+---
+
+## 多 Agent 说明
+
+### analyze 侧
+
+当前分析链路已支持：
+
+- `planner_agent`
+- `repo_agent`
+- `readme_agent`
+- `structure_agent`
+- `codebase_agent`
+- `profile_agent`
+- `insight_agent`
+- `verifier_agent`
+- `memory_agent`
+
+并且已经具备：
+
+- 动态任务裁剪
+- 任务卡片
+- 角色依赖
+- 并行波次元数据
+- `local` / `langgraph` 双编排器
+
+### answer 侧
+
+当前问答链路已支持：
+
+- `router_agent`
+- `retrieval_agent`
+- `code_agent`
+- `synthesis_agent`
+- `verifier_agent`
+- `recovery_agent`
+- `revision_agent`
+
+---
+
+## 当前推荐使用方式
+
+如果你是第一次使用，建议按这个顺序来：
+
+1. `python main.py analyze <GitHub URL>`
+2. `python main.py answer <owner/repo> "这个项目是做什么的？" --no-llm`
+3. `python main.py search "你的问题"`
+4. 再按需切换：
+   - `--embedding-mode ollama`
+   - `--orchestrator langgraph`
+   - LLM 配置
+
+---
+
+## 文档
+
+- 当前进度：`docs/current_progress.md`
+- 命令示例：`docs/command_examples.md`
+- 类职责与数据流：`docs/class_and_dataflow.md`
+- 多 Agent 架构：`docs/multi_agent_architecture.md`
+- 产品需求：`docs/RepoInsight.md`
+
+---
+
+## 已知边界
+
+> [!NOTE]
+> 当前更适合把 RepoInsight 理解为“可正常使用的 CLI 分析 / 检索 / 问答工具”，而不是已经全部完成的最终产品。
+
+当前还没完成：
+
+- Web UI
+- GraphRAG / 图数据库
+- 多仓库对比查询
+- GitHub Action 集成
+- 更多托管平台支持
+- 更深的多语言专项分析
+
+---
+
+## 后续方向
+
+RepoInsight 接下来最自然的演进方向是：
+
+- 更强的代码关系理解
+- 更深的 analyze / answer 多 Agent 协作
+- 子项目级调度与更强的并行执行
+- GraphRAG
+- Web UI
