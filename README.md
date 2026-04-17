@@ -383,38 +383,8 @@ flowchart LR
 
 ---
 
-## 文档
-
-- 当前进度：`docs/current_progress.md`
-- 命令示例：`docs/command_examples.md`
-- 类职责与数据流：`docs/class_and_dataflow.md`
-- 多 Agent 架构：`docs/multi_agent_architecture.md`
-- 产品需求：`docs/RepoInsight.md`
-
----
-
-## 已知边界
-
-> [!NOTE]
-> 当前更适合把 RepoInsight 理解为“可正常使用的 CLI 分析 / 检索 / 问答工具”，而不是已经全部完成的最终产品。
-
-当前还没完成：
-
-- Web UI
-- GraphRAG / 图数据库
-- 多仓库对比查询
-- GitHub Action 集成
-- 更多托管平台支持
-- 更深的多语言专项分析
-
----
 
 ## 后续方向
 
-RepoInsight 接下来最自然的演进方向是：
-
-- 更强的代码关系理解
-- 更深的 analyze / answer 多 Agent 协作
-- 子项目级调度与更强的并行执行
 - GraphRAG
 - Web UI
