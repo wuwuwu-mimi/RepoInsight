@@ -86,6 +86,28 @@ def generate_json_report_payload(
                 }
                 for item in profile.module_relations
             ],
+            'code_entities': [
+                {
+                    'entity_kind': item.entity_kind,
+                    'name': item.name,
+                    'qualified_name': item.qualified_name,
+                    'source_path': item.source_path,
+                    'language_scope': item.language_scope,
+                    'location': item.location,
+                    'tags': item.tags,
+                }
+                for item in profile.code_entities
+            ],
+            'code_relation_edges': [
+                {
+                    'source_ref': item.source_ref,
+                    'target_ref': item.target_ref,
+                    'relation_type': item.relation_type,
+                    'source_path': item.source_path,
+                    'line_number': item.line_number,
+                }
+                for item in profile.code_relation_edges
+            ],
             'function_summaries': [
                 {
                     'name': item.name,

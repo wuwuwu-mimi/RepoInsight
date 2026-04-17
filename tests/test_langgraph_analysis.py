@@ -79,6 +79,7 @@ def _build_analysis_result():
     result.stage_trace = [
         StageTraceEntry(stage_name='validate_analysis_url_stage', status='success', detail='URL 校验通过'),
         StageTraceEntry(stage_name='fetch_repo_metadata_stage', status='success', detail='已获取仓库元数据'),
+        StageTraceEntry(stage_name='fetch_repo_readme_stage', status='success', detail='已获取 README'),
         StageTraceEntry(stage_name='clone_repository_stage', status='success', detail='已克隆到 clones/demo__sample'),
         StageTraceEntry(stage_name='scan_repository_stage', status='success', detail='扫描到 0 个文件，识别出 0 个关键文件'),
         StageTraceEntry(stage_name='read_key_files_stage', status='success', detail='读取了 0 个关键文件'),
@@ -104,16 +105,77 @@ def test_run_langgraph_analysis_with_fake_langgraph() -> None:
         assert coordinated.shared_context['orchestrator'] == 'langgraph'
         assert coordinated.shared_context['project_type'] == 'CLI 工具'
         assert [item.role for item in coordinated.agent_trace] == [
-            'metadata_agent',
+            'planner_agent',
+            'repo_agent',
+            'readme_agent',
             'structure_agent',
+            'codebase_agent',
             'profile_agent',
             'insight_agent',
+            'verifier_agent',
         ]
         assert coordinated.index_result is None
+        assert coordinated.agent_trace[-1].structured_output is not None
     finally:
         langgraph_analysis_module.run_analysis = original_run_analysis
         _uninstall_fake_langgraph()
 
+
+
+def test_run_langgraph_analysis_can_skip_codebase_and_profile_agents() -> None:
+    original_run_analysis = langgraph_analysis_module.run_analysis
+    _install_fake_langgraph()
+    try:
+        result = _build_analysis_result()
+        result.project_type = '文档项目'
+        result.project_profile.primary_language = None
+        result.project_profile.languages = []
+        result.project_profile.runtimes = []
+        result.project_profile.frameworks = []
+        result.project_profile.build_tools = []
+        result.project_profile.package_managers = []
+        result.project_profile.test_tools = []
+        result.project_profile.deploy_tools = []
+        result.project_profile.entrypoints = []
+        result.project_profile.subprojects = []
+        result.project_profile.module_relations = []
+        result.project_profile.code_entities = []
+        result.project_profile.code_relation_edges = []
+        result.project_profile.function_summaries = []
+        result.project_profile.class_summaries = []
+        result.project_profile.api_route_summaries = []
+        result.project_profile.confirmed_signals = []
+        result.project_profile.weak_signals = []
+        result.tech_stack = []
+        langgraph_analysis_module.run_analysis = lambda url: result
+
+        coordinated = run_langgraph_analysis(
+            'https://github.com/demo/sample',
+            persist_knowledge=False,
+        )
+
+        assert [item.role for item in coordinated.agent_plan] == [
+            'planner_agent',
+            'repo_agent',
+            'readme_agent',
+            'structure_agent',
+            'insight_agent',
+            'verifier_agent',
+        ]
+        assert [item.role for item in coordinated.agent_trace] == [
+            'planner_agent',
+            'repo_agent',
+            'readme_agent',
+            'structure_agent',
+            'insight_agent',
+            'verifier_agent',
+        ]
+        assert coordinated.shared_context['planner_skipped_roles'] == ['codebase_agent', 'profile_agent', 'memory_agent']
+        assert coordinated.shared_context['planner_parallel_groups'] == []
+        assert coordinated.shared_context['agent_execution_mode'] == 'langgraph_dynamic'
+    finally:
+        langgraph_analysis_module.run_analysis = original_run_analysis
+        _uninstall_fake_langgraph()
 
 def test_run_langgraph_analysis_can_attach_memory_agent() -> None:
     original_run_analysis = langgraph_analysis_module.run_analysis
@@ -136,7 +198,10 @@ def test_run_langgraph_analysis_can_attach_memory_agent() -> None:
         assert coordinated.index_result is not None
         assert coordinated.agent_plan[-1].role == 'memory_agent'
         assert coordinated.agent_trace[-1].role == 'memory_agent'
+        assert coordinated.agent_trace[-2].role == 'verifier_agent'
         assert coordinated.shared_context['memory_vector_backend'] == 'chroma'
+        assert coordinated.shared_context['agent_execution_mode'] == 'langgraph_dynamic'
+        assert 'codebase_agent + profile_agent' in coordinated.shared_context['planner_parallel_groups']
     finally:
         langgraph_analysis_module.run_analysis = original_run_analysis
         langgraph_analysis_module.index_analysis_result = original_index_analysis_result
@@ -179,12 +244,27 @@ def test_analyze_command_uses_langgraph_orchestrator() -> None:
             called['langgraph'] += 1
             assert persist_knowledge is False
             result = _build_analysis_result()
+            task_packets = analysis_coordinator_module.build_analysis_task_packets(
+                result,
+                include_memory_agent=False,
+            )
             return CoordinatedAnalysisResult(
                 analysis_result=result,
                 agent_plan=analysis_coordinator_module.build_default_analysis_agent_plan(),
-                agent_trace=analysis_coordinator_module.build_agent_trace_from_stage_trace(result.stage_trace),
+                agent_trace=[
+                    analysis_coordinator_module._build_planner_agent_record(
+                        analysis_coordinator_module.build_default_analysis_agent_plan(),
+                        task_packets,
+                    )
+                ]
+                + analysis_coordinator_module.build_agent_trace_from_stage_trace(
+                    result.stage_trace,
+                    analysis_result=result,
+                    task_packets_by_role=task_packets,
+                )
+                + [analysis_coordinator_module._build_verifier_agent_record(result)],
                 index_result=None,
-                shared_context={'orchestrator': 'langgraph'},
+                shared_context={'orchestrator': 'langgraph', 'planner_task_count': len(task_packets)},
             )
 
         def fake_run_multi_agent_analysis(url: str, *, persist_knowledge: bool) -> CoordinatedAnalysisResult:
@@ -207,6 +287,15 @@ def test_analyze_command_uses_langgraph_orchestrator() -> None:
         assert called['local'] == 0
         assert '编排器' in rendered
         assert 'langgraph' in rendered
+        assert '任务规划' in rendered
+        assert '仓库摘要' in rendered
+        assert 'README 摘要' in rendered
+        assert '代码库摘要' in rendered
+        assert '技术栈摘要' in rendered
+        assert '洞察摘要' in rendered
+        assert '分析验证' in rendered
+        assert '验证结论' in rendered
+        assert '关键证据' in rendered
     finally:
         cli_main._apply_embedding_mode = original_apply_embedding_mode
         cli_main.run_langgraph_analysis = original_run_langgraph_analysis

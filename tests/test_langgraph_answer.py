@@ -5,12 +5,14 @@ import types
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import repoinsight.agents.code_agent as code_agent_module
 import repoinsight.agents.langgraph_answer as langgraph_answer_module
 import repoinsight.cli.main as cli_main
 from repoinsight.agents.langgraph_answer import run_langgraph_answer
 from repoinsight.models.analysis_model import KeyFileContent
 from repoinsight.storage.document_builder import build_knowledge_documents
 from repoinsight.storage.local_knowledge_store import save_repo_documents
+from tests.test_code_agent import _build_cross_file_analysis_result, _build_cross_file_clone_repo
 from tests.test_summary_builders import _build_result
 
 
@@ -127,10 +129,61 @@ def test_run_langgraph_answer_with_fake_langgraph() -> None:
         ]
         assert coordinated.verification_result is not None
         assert coordinated.answer_result.answer_mode == 'extractive'
+        trace_by_role = {item.role: item for item in coordinated.agent_trace}
+        assert trace_by_role['retrieval_agent'].structured_output is not None
+        assert trace_by_role['synthesis_agent'].structured_output is not None
+        assert trace_by_role['verifier_agent'].structured_output is not None
+        assert trace_by_role['recovery_agent'].structured_output is not None
     finally:
         _uninstall_fake_langgraph()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+
+def test_run_langgraph_answer_routes_architecture_question_to_architecture_agent() -> None:
+    temp_dir = Path('data/test_langgraph_architecture_answer')
+    clone_root = Path('data/test_langgraph_architecture_repo')
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    shutil.rmtree(clone_root, ignore_errors=True)
+    original_get_clone_path = code_agent_module.get_clone_path
+    _install_fake_langgraph()
+    try:
+        real_clone_path = _build_cross_file_clone_repo(clone_root)
+        code_agent_module.get_clone_path = lambda repo_id: real_clone_path
+        documents = build_knowledge_documents(_build_cross_file_analysis_result())
+        save_repo_documents(repo_id='demo/sample', documents=documents, target_dir=str(temp_dir))
+
+        coordinated = run_langgraph_answer(
+            repo_id='demo/sample',
+            question='这个项目的登录模块依赖关系是怎样的？',
+            target_dir=str(temp_dir),
+            use_llm=False,
+        )
+
+        assert coordinated.route_decision.focus == 'architecture'
+        assert coordinated.shared_context['orchestrator'] == 'langgraph'
+        assert coordinated.shared_context['architecture_agent_enabled'] is True
+        assert coordinated.shared_context['investigation_agent_role'] == 'architecture_agent'
+        assert [item.role for item in coordinated.agent_trace] == [
+            'router_agent',
+            'retrieval_agent',
+            'architecture_agent',
+            'synthesis_agent',
+            'verifier_agent',
+            'recovery_agent',
+            'revision_agent',
+        ]
+        assert coordinated.agent_trace[2].display_name == 'Architecture Agent'
+        assert coordinated.agent_trace[2].structured_output is not None
+        assert coordinated.code_investigation is not None
+        assert any(
+            chain == 'POST /session -> auth_service.login_user -> session_repo.persist_session'
+            for chain in coordinated.code_investigation.relation_chains
+        )
+    finally:
+        _uninstall_fake_langgraph()
+        code_agent_module.get_clone_path = original_get_clone_path
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(clone_root, ignore_errors=True)
 
 
 def test_answer_command_reports_missing_langgraph_dependency() -> None:

@@ -53,6 +53,10 @@ def _build_stage_detail(stage_name: str, state: AnalysisState) -> str:
         return 'URL 校验通过'
     if stage_name == 'fetch_repo_metadata_stage':
         return '已获取仓库元数据'
+    if stage_name == 'fetch_repo_readme_stage':
+        if state.repo_info is not None and state.repo_info.readme and state.repo_info.readme.strip():
+            return '已获取 README'
+        return 'README 缺失或未成功获取'
     if stage_name == 'clone_repository_stage':
         if state.clone_path:
             return f'已克隆到 {state.clone_path}'

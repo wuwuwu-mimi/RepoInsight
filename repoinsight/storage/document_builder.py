@@ -1,16 +1,23 @@
 from repoinsight.models.analysis_model import AnalysisRunResult, ApiRouteSummary, ClassSummary, FunctionSummary, KeyFileContent
 from repoinsight.models.rag_model import ConfigSummary, EntrypointSummary, KnowledgeDocument
+from repoinsight.analyze.code_semantics import infer_call_relation_type
 from repoinsight.storage.summary_builders import build_config_summaries, build_entrypoint_summaries
 
 
 # 为了让 RAG MVP 更稳定，关键文件摘要默认只保留前 2000 个字符。
 MAX_KEY_FILE_CONTENT_CHARS = 2000
+MAX_CODE_CHUNK_LINES = 24
+MAX_CODE_CHUNK_CHARS = 1800
+MAX_ROUTE_CHUNK_CONTEXT_BEFORE = 2
+MAX_ROUTE_CHUNK_CONTEXT_AFTER = 10
+MAX_CONFIG_CHUNK_LINES = 40
 
 
 def build_knowledge_documents(result: AnalysisRunResult) -> list[KnowledgeDocument]:
     """把一次仓库分析结果拆分为可检索的知识文档。"""
     repo = result.repo_info.repo_model
     repo_id = repo.full_name
+    source_lookup = _build_key_file_content_lookup(result)
 
     documents: list[KnowledgeDocument] = [
         _build_repo_summary_document(result),
@@ -22,18 +29,30 @@ def build_knowledge_documents(result: AnalysisRunResult) -> list[KnowledgeDocume
 
     for summary in build_config_summaries(result):
         documents.append(_build_config_summary_document(summary, result))
+        chunk_document = _build_config_chunk_document(summary, result, source_lookup)
+        if chunk_document is not None:
+            documents.append(chunk_document)
 
     for summary in build_entrypoint_summaries(result):
         documents.append(_build_entrypoint_summary_document(summary, result))
 
     for summary in result.project_profile.api_route_summaries:
         documents.append(_build_api_route_summary_document(summary, result))
+        chunk_document = _build_route_handler_chunk_document(summary, result, source_lookup)
+        if chunk_document is not None:
+            documents.append(chunk_document)
 
     for summary in result.project_profile.function_summaries:
         documents.append(_build_function_summary_document(summary, result))
+        chunk_document = _build_function_body_chunk_document(summary, result, source_lookup)
+        if chunk_document is not None:
+            documents.append(chunk_document)
 
     for summary in result.project_profile.class_summaries:
         documents.append(_build_class_summary_document(summary, result))
+        chunk_document = _build_class_body_chunk_document(summary, result, source_lookup)
+        if chunk_document is not None:
+            documents.append(chunk_document)
 
     for subproject in result.project_profile.subprojects:
         documents.append(_build_subproject_summary_document(result, subproject.root_path))
@@ -42,6 +61,14 @@ def build_knowledge_documents(result: AnalysisRunResult) -> list[KnowledgeDocume
         documents.append(_build_key_file_summary_document(repo_id, item, result))
 
     return documents
+
+
+def _build_key_file_content_lookup(result: AnalysisRunResult) -> dict[str, KeyFileContent]:
+    """按源码路径建立关键文件内容索引，便于生成代码块级知识文档。"""
+    return {
+        item.path: item
+        for item in result.key_file_contents
+    }
 
 
 def _build_repo_summary_document(result: AnalysisRunResult) -> KnowledgeDocument:
@@ -340,7 +367,7 @@ def _build_api_route_summary_document(
         (summary.source_path, route_ref, 'contain_route'),
         (route_ref, summary.handler_qualified_name, 'handle_route'),
         *[
-            (summary.handler_qualified_name, called_symbol, 'call')
+            (summary.handler_qualified_name, called_symbol, infer_call_relation_type(called_symbol))
             for called_symbol in summary.called_symbols
         ],
     ]
@@ -405,7 +432,10 @@ def _build_function_summary_document(
     relation_edges = [(summary.source_path, summary.qualified_name, 'contain_symbol')]
     if summary.owner_class:
         relation_edges.append((summary.owner_class, summary.qualified_name, 'define_method'))
-    relation_edges.extend((summary.qualified_name, called_symbol, 'call') for called_symbol in summary.called_symbols)
+    relation_edges.extend(
+        (summary.qualified_name, called_symbol, infer_call_relation_type(called_symbol))
+        for called_symbol in summary.called_symbols
+    )
     metadata.update(
         {
             'source_path': summary.source_path,
@@ -509,6 +539,408 @@ def _build_class_summary_document(
         source_path=summary.source_path,
         metadata=metadata,
     )
+
+
+def _build_function_body_chunk_document(
+    summary: FunctionSummary,
+    result: AnalysisRunResult,
+    source_lookup: dict[str, KeyFileContent],
+) -> KnowledgeDocument | None:
+    """把函数源码切成更接近实现细节的代码块文档。"""
+    source_item = source_lookup.get(summary.source_path)
+    if source_item is None:
+        return None
+
+    chunk_text, chunk_line_start, chunk_line_end = _extract_line_range_chunk(
+        source_item.content,
+        line_start=summary.line_start,
+        line_end=summary.line_end,
+        context_before=1,
+        context_after=2,
+        max_lines=MAX_CODE_CHUNK_LINES,
+        max_chars=MAX_CODE_CHUNK_CHARS,
+    )
+    if not chunk_text:
+        return None
+
+    metadata = _build_common_metadata(result)
+    subproject_root, subproject_markers = _resolve_subproject_context(result, summary.source_path)
+    relation_edges = [(summary.source_path, summary.qualified_name, 'contain_symbol')]
+    if summary.owner_class:
+        relation_edges.append((summary.owner_class, summary.qualified_name, 'define_method'))
+    relation_edges.extend(
+        (summary.qualified_name, called_symbol, infer_call_relation_type(called_symbol))
+        for called_symbol in summary.called_symbols
+    )
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'function_body_chunk',
+            'code_chunk_kind': 'function_body',
+            'symbol_name': summary.name,
+            'qualified_name': summary.qualified_name,
+            'owner_class': summary.owner_class or '',
+            'language_scope': summary.language_scope,
+            'line_start': chunk_line_start,
+            'line_end': chunk_line_end,
+            'signature': summary.signature,
+            'decorators': summary.decorators,
+            'parameters': summary.parameters,
+            'called_symbols': summary.called_symbols,
+            'return_signals': summary.return_signals,
+            'subproject_root': subproject_root or '',
+            'subproject_markers': subproject_markers,
+            'code_entity_names': [summary.name],
+            'code_entity_kinds': ['function'],
+            'code_entity_refs': [summary.qualified_name],
+        }
+    )
+    metadata.update(_build_relation_metadata(relation_edges))
+    lines = [
+        f'仓库 {result.repo_info.repo_model.full_name} 中的函数源码片段。',
+        f'来源文件：{summary.source_path}',
+        f'符号名称：{summary.name}',
+        f'限定名：{summary.qualified_name}',
+        f'语言范围：{summary.language_scope}',
+        f'代码位置：{_format_line_range(chunk_line_start, chunk_line_end)}',
+        f'所属类：{summary.owner_class or "无"}',
+        f'函数签名：{summary.signature}',
+        f'调用：{_join_or_none(summary.called_symbols)}',
+        f'返回线索：{_join_or_none(summary.return_signals)}',
+        f'所属子项目：{subproject_root or "无"}',
+        f'摘要：{summary.summary}',
+        '源码片段：',
+        '```text',
+        chunk_text,
+        '```',
+    ]
+    return KnowledgeDocument(
+        doc_id=f'{result.repo_info.repo_model.full_name}::function_body_chunk::{summary.source_path}::{summary.qualified_name}',
+        repo_id=result.repo_info.repo_model.full_name,
+        doc_type='function_body_chunk',
+        title=f'{result.repo_info.repo_model.full_name}::{summary.qualified_name} 函数源码片段',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
+def _build_class_body_chunk_document(
+    summary: ClassSummary,
+    result: AnalysisRunResult,
+    source_lookup: dict[str, KeyFileContent],
+) -> KnowledgeDocument | None:
+    """把类定义切成更适合实现类问题召回的代码块文档。"""
+    source_item = source_lookup.get(summary.source_path)
+    if source_item is None:
+        return None
+
+    chunk_text, chunk_line_start, chunk_line_end = _extract_line_range_chunk(
+        source_item.content,
+        line_start=summary.line_start,
+        line_end=summary.line_end,
+        context_before=1,
+        context_after=2,
+        max_lines=MAX_CODE_CHUNK_LINES,
+        max_chars=MAX_CODE_CHUNK_CHARS,
+    )
+    if not chunk_text:
+        return None
+
+    metadata = _build_common_metadata(result)
+    subproject_root, subproject_markers = _resolve_subproject_context(result, summary.source_path)
+    method_refs = _resolve_class_method_refs(summary, result)
+    relation_edges = [(summary.source_path, summary.qualified_name, 'contain_symbol')]
+    relation_edges.extend((summary.qualified_name, method_ref, 'define_method') for method_ref in method_refs)
+    relation_edges.extend((summary.qualified_name, base_name, 'inherit') for base_name in summary.bases)
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'class_body_chunk',
+            'code_chunk_kind': 'class_body',
+            'symbol_name': summary.name,
+            'qualified_name': summary.qualified_name,
+            'language_scope': summary.language_scope,
+            'line_start': chunk_line_start,
+            'line_end': chunk_line_end,
+            'bases': summary.bases,
+            'decorators': summary.decorators,
+            'class_methods': summary.methods,
+            'subproject_root': subproject_root or '',
+            'subproject_markers': subproject_markers,
+            'code_entity_names': [summary.name] + summary.methods,
+            'code_entity_kinds': ['class'] + (['function'] * len(summary.methods)),
+            'code_entity_refs': [summary.qualified_name] + method_refs,
+        }
+    )
+    metadata.update(_build_relation_metadata(relation_edges))
+    lines = [
+        f'仓库 {result.repo_info.repo_model.full_name} 中的类源码片段。',
+        f'来源文件：{summary.source_path}',
+        f'类名称：{summary.name}',
+        f'限定名：{summary.qualified_name}',
+        f'语言范围：{summary.language_scope}',
+        f'代码位置：{_format_line_range(chunk_line_start, chunk_line_end)}',
+        f'继承：{_join_or_none(summary.bases)}',
+        f'方法：{_join_or_none(summary.methods)}',
+        f'所属子项目：{subproject_root or "无"}',
+        f'摘要：{summary.summary}',
+        '源码片段：',
+        '```text',
+        chunk_text,
+        '```',
+    ]
+    return KnowledgeDocument(
+        doc_id=f'{result.repo_info.repo_model.full_name}::class_body_chunk::{summary.source_path}::{summary.qualified_name}',
+        repo_id=result.repo_info.repo_model.full_name,
+        doc_type='class_body_chunk',
+        title=f'{result.repo_info.repo_model.full_name}::{summary.qualified_name} 类源码片段',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
+def _build_route_handler_chunk_document(
+    summary: ApiRouteSummary,
+    result: AnalysisRunResult,
+    source_lookup: dict[str, KeyFileContent],
+) -> KnowledgeDocument | None:
+    """把路由处理附近的源码切成接口实现代码块文档。"""
+    source_item = source_lookup.get(summary.source_path)
+    if source_item is None:
+        return None
+
+    chunk_text, chunk_line_start, chunk_line_end = _extract_line_window_chunk(
+        source_item.content,
+        line_number=summary.line_number,
+        context_before=MAX_ROUTE_CHUNK_CONTEXT_BEFORE,
+        context_after=MAX_ROUTE_CHUNK_CONTEXT_AFTER,
+        max_lines=MAX_CODE_CHUNK_LINES,
+        max_chars=MAX_CODE_CHUNK_CHARS,
+    )
+    if not chunk_text:
+        return None
+
+    metadata = _build_common_metadata(result)
+    subproject_root, subproject_markers = _resolve_subproject_context(result, summary.source_path)
+    methods_text = '/'.join(summary.http_methods) if summary.http_methods else 'HTTP'
+    route_ref = f'{methods_text} {summary.route_path}'
+    relation_edges = [
+        (summary.source_path, route_ref, 'contain_route'),
+        (route_ref, summary.handler_qualified_name, 'handle_route'),
+        *[
+            (summary.handler_qualified_name, called_symbol, infer_call_relation_type(called_symbol))
+            for called_symbol in summary.called_symbols
+        ],
+    ]
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'route_handler_chunk',
+            'code_chunk_kind': 'route_handler',
+            'route_path': summary.route_path,
+            'http_methods': summary.http_methods,
+            'framework': summary.framework or '',
+            'handler_name': summary.handler_name,
+            'handler_qualified_name': summary.handler_qualified_name,
+            'owner_class': summary.owner_class or '',
+            'language_scope': summary.language_scope,
+            'line_start': chunk_line_start,
+            'line_end': chunk_line_end,
+            'line_number': summary.line_number or 0,
+            'decorators': summary.decorators,
+            'called_symbols': summary.called_symbols,
+            'subproject_root': subproject_root or '',
+            'subproject_markers': subproject_markers,
+            'code_entity_names': [route_ref, summary.handler_name],
+            'code_entity_kinds': ['api_route', 'function'],
+            'code_entity_refs': [route_ref, summary.handler_qualified_name],
+        }
+    )
+    metadata.update(_build_relation_metadata(relation_edges))
+    lines = [
+        f'仓库 {result.repo_info.repo_model.full_name} 中的接口处理源码片段。',
+        f'来源文件：{summary.source_path}',
+        f'路由路径：{summary.route_path}',
+        f'HTTP 方法：{methods_text}',
+        f'处理函数：{summary.handler_name}',
+        f'处理限定名：{summary.handler_qualified_name}',
+        f'框架线索：{summary.framework or "未知"}',
+        f'代码位置：{_format_line_range(chunk_line_start, chunk_line_end)}',
+        f'调用：{_join_or_none(summary.called_symbols)}',
+        f'所属子项目：{subproject_root or "无"}',
+        f'摘要：{summary.summary}',
+        '源码片段：',
+        '```text',
+        chunk_text,
+        '```',
+    ]
+    return KnowledgeDocument(
+        doc_id=(
+            f'{result.repo_info.repo_model.full_name}::route_handler_chunk::'
+            f'{summary.source_path}::{methods_text}::{summary.route_path}'
+        ),
+        repo_id=result.repo_info.repo_model.full_name,
+        doc_type='route_handler_chunk',
+        title=f'{result.repo_info.repo_model.full_name}::{methods_text} {summary.route_path} 接口源码片段',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
+def _build_config_chunk_document(
+    summary: ConfigSummary,
+    result: AnalysisRunResult,
+    source_lookup: dict[str, KeyFileContent],
+) -> KnowledgeDocument | None:
+    """把配置文件原文切出一份配置代码块文档，便于环境与脚本类问题召回。"""
+    source_item = source_lookup.get(summary.source_path)
+    if source_item is None:
+        return None
+
+    chunk_text, chunk_line_start, chunk_line_end = _extract_line_window_chunk(
+        source_item.content,
+        line_number=1,
+        context_before=0,
+        context_after=MAX_CONFIG_CHUNK_LINES - 1,
+        max_lines=MAX_CONFIG_CHUNK_LINES,
+        max_chars=MAX_CODE_CHUNK_CHARS,
+    )
+    if not chunk_text:
+        return None
+
+    metadata = _build_common_metadata(result)
+    metadata.update(
+        {
+            'source_path': summary.source_path,
+            'summary_kind': 'config_chunk',
+            'code_chunk_kind': 'config',
+            'config_kind': summary.config_kind,
+            'language_scope': summary.language_scope,
+            'config_key_points': summary.key_points,
+            'config_scripts_or_commands': summary.scripts_or_commands,
+            'config_service_dependencies': summary.service_dependencies,
+            'config_env_vars': summary.env_vars,
+            'config_related_paths': summary.related_paths,
+            'subproject_root': summary.subproject_root or '',
+            'subproject_markers': summary.subproject_markers,
+            'line_start': chunk_line_start,
+            'line_end': chunk_line_end,
+            'code_symbols': summary.code_symbols,
+            'code_symbol_names': _extract_names_from_formatted_items(summary.code_symbols),
+            'module_relations': summary.module_relations,
+            'module_relation_targets': _extract_targets_from_formatted_relations(summary.module_relations),
+        }
+    )
+    lines = [
+        f'仓库 {summary.repo_id} 中的配置文件片段。',
+        f'来源文件：{summary.source_path}',
+        f'配置类型：{summary.config_kind}',
+        f'语言范围：{summary.language_scope}',
+        f'所属子项目：{summary.subproject_root or "无"}',
+        f'关键结论：{_join_or_none(summary.key_points)}',
+        f'脚本或命令：{_join_or_none(summary.scripts_or_commands)}',
+        f'环境变量：{_join_or_none(summary.env_vars)}',
+        f'外部服务依赖：{_join_or_none(summary.service_dependencies)}',
+        f'摘要：{summary.summary}',
+        '配置片段：',
+        '```text',
+        chunk_text,
+        '```',
+    ]
+    return KnowledgeDocument(
+        doc_id=f'{summary.repo_id}::config_chunk::{summary.source_path}',
+        repo_id=summary.repo_id,
+        doc_type='config_chunk',
+        title=f'{summary.repo_id}::{summary.source_path} 配置片段',
+        content='\n'.join(lines),
+        source_path=summary.source_path,
+        metadata=metadata,
+    )
+
+
+def _extract_line_range_chunk(
+    content: str,
+    *,
+    line_start: int | None,
+    line_end: int | None,
+    context_before: int,
+    context_after: int,
+    max_lines: int,
+    max_chars: int,
+) -> tuple[str, int, int]:
+    """按行号范围切出源码片段，并保留少量上下文。"""
+    lines = content.splitlines()
+    if not lines:
+        return '', 0, 0
+
+    if line_start is None and line_end is None:
+        return _extract_line_window_chunk(
+            content,
+            line_number=1,
+            context_before=0,
+            context_after=max_lines - 1,
+            max_lines=max_lines,
+            max_chars=max_chars,
+        )
+
+    actual_start = max(1, (line_start or line_end or 1) - context_before)
+    actual_end = min(len(lines), max(line_end or line_start or 1, line_start or 1) + context_after)
+    return _slice_lines_with_numbers(
+        lines,
+        actual_start=actual_start,
+        actual_end=actual_end,
+        max_lines=max_lines,
+        max_chars=max_chars,
+    )
+
+
+def _extract_line_window_chunk(
+    content: str,
+    *,
+    line_number: int | None,
+    context_before: int,
+    context_after: int,
+    max_lines: int,
+    max_chars: int,
+) -> tuple[str, int, int]:
+    """按中心行号截取一段窗口，用于路由和配置等场景。"""
+    lines = content.splitlines()
+    if not lines:
+        return '', 0, 0
+
+    center_line = max(1, line_number or 1)
+    actual_start = max(1, center_line - context_before)
+    actual_end = min(len(lines), center_line + context_after)
+    return _slice_lines_with_numbers(
+        lines,
+        actual_start=actual_start,
+        actual_end=actual_end,
+        max_lines=max_lines,
+        max_chars=max_chars,
+    )
+
+
+def _slice_lines_with_numbers(
+    lines: list[str],
+    *,
+    actual_start: int,
+    actual_end: int,
+    max_lines: int,
+    max_chars: int,
+) -> tuple[str, int, int]:
+    """把指定行范围转成带行号的文本，并控制最大长度。"""
+    bounded_end = min(actual_end, actual_start + max_lines - 1)
+    numbered_lines = [
+        f'L{line_number}: {lines[line_number - 1]}'
+        for line_number in range(actual_start, bounded_end + 1)
+    ]
+    chunk_text = '\n'.join(numbered_lines)
+    if len(chunk_text) > max_chars:
+        chunk_text = chunk_text[: max_chars - 3].rstrip() + '...'
+    return chunk_text, actual_start, bounded_end
 
 
 def _build_common_metadata(result: AnalysisRunResult) -> dict[str, str | int | float | bool | list[str]]:

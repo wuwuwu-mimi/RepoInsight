@@ -103,6 +103,31 @@ def generate_markdown_report(result: AnalysisRunResult) -> str:
     else:
         lines.extend(['', '### 模块依赖', '- 未抽取到模块依赖'])
 
+    if profile.code_entities:
+        lines.extend(['', '### 统一代码实体'])
+        for item in profile.code_entities[:40]:
+            qualified_name = item.qualified_name or item.name
+            source_path = item.source_path or 'unknown'
+            location = f' ({item.location})' if item.location else ''
+            tags = f' [{", ".join(item.tags)}]' if item.tags else ''
+            lines.append(
+                f'- `{source_path}` · {item.entity_kind} `{qualified_name}`'
+                f'{location}{tags}'
+            )
+    else:
+        lines.extend(['', '### 统一代码实体', '- 暂未抽取到统一代码实体'])
+
+    if profile.code_relation_edges:
+        lines.extend(['', '### 统一代码关系边'])
+        for item in profile.code_relation_edges[:40]:
+            source_path = item.source_path or 'unknown'
+            lines.append(
+                f'- `{source_path}` · `{item.source_ref}` -[{item.relation_type}]-> `{item.target_ref}`'
+                f'{_format_line_suffix(item.line_number)}'
+            )
+    else:
+        lines.extend(['', '### 统一代码关系边', '- 暂未抽取到统一代码关系边'])
+
     if profile.function_summaries:
         lines.extend(['', '### 函数级摘要'])
         for item in profile.function_summaries[:20]:

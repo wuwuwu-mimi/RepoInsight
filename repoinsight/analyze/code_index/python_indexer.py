@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import re
 
+from repoinsight.analyze.code_semantics import normalize_python_call_target
 from repoinsight.analyze.code_index.common import (
     _CodeIndexAccumulator,
     _build_api_route_summary_text,
@@ -32,7 +33,7 @@ class _PythonFunctionInspector(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         target = _python_expr_to_text(node.func)
         if target:
-            self.called_symbols.append(target)
+            self.called_symbols.append(normalize_python_call_target(target))
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:
@@ -504,7 +505,7 @@ def _collect_python_tree_sitter_call_targets(node, source_bytes: bytes) -> list[
         if current.type == 'call':
             function_node = current.child_by_field_name('function')
             if function_node is not None:
-                target = get_node_text(function_node, source_bytes).strip()
+                target = normalize_python_call_target(get_node_text(function_node, source_bytes).strip())
                 if target:
                     calls.append(target)
         for child in getattr(current, 'named_children', []):

@@ -4,7 +4,8 @@ from collections.abc import Callable
 from typing import Any, TypedDict
 
 from repoinsight.agents.answer_coordinator import (
-    _build_code_agent_record,
+    _build_investigation_context_lines,
+    _build_investigation_agent_record,
     _build_recovery_record,
     _build_retrieval_record,
     _build_revision_record,
@@ -13,13 +14,14 @@ from repoinsight.agents.answer_coordinator import (
     _build_verifier_record,
     _recover_answer_by_issue_tags,
     _revise_answer_if_needed,
+    _resolve_investigation_agent_role,
     _should_run_code_agent,
-    _run_code_agent_pipeline,
+    _should_run_architecture_agent,
+    _should_use_investigation_context,
+    _run_investigation_agent_pipeline,
     _verify_answer_consistency,
     build_default_answer_agent_plan,
 )
-from repoinsight.agents.code_agent import build_code_investigation_context_lines
-from repoinsight.agents.code_agent import should_use_code_investigation_context
 from repoinsight.agents.execution import execute_with_retry
 from repoinsight.agents.models import AgentRunRecord, AnswerRouteDecision, CoordinatedAnswerResult
 from repoinsight.answer.service import (
@@ -58,6 +60,7 @@ class _AnswerGraphState(TypedDict, total=False):
     code_outcome: Any
     extra_context_lines: list[str] | None
     code_investigation: Any
+    investigation_agent_role: str | None
     answer_result: Any
     verification_result: Any
     recovery_result: Any
@@ -126,6 +129,7 @@ def build_answer_state_graph():
     graph.add_node('router_agent', _router_node)
     graph.add_node('retrieval_agent', _retrieval_node)
     graph.add_node('code_agent', _code_node)
+    graph.add_node('architecture_agent', _architecture_node)
     graph.add_node('synthesis_agent', _synthesis_node)
     graph.add_node('verifier_agent', _verifier_node)
     graph.add_node('recovery_agent', _recovery_node)
@@ -137,10 +141,12 @@ def build_answer_state_graph():
         _after_retrieval_route,
         {
             'code_agent': 'code_agent',
+            'architecture_agent': 'architecture_agent',
             'synthesis_agent': 'synthesis_agent',
         },
     )
     graph.add_edge('code_agent', 'synthesis_agent')
+    graph.add_edge('architecture_agent', 'synthesis_agent')
     graph.add_edge('synthesis_agent', 'verifier_agent')
     graph.add_edge('verifier_agent', 'recovery_agent')
     graph.add_edge('recovery_agent', 'revision_agent')
@@ -230,12 +236,15 @@ def _retrieval_node(state: _AnswerGraphState) -> dict[str, Any]:
 def _after_retrieval_route(state: _AnswerGraphState) -> str:
     if _should_run_code_agent(state['focus'], state['prioritized_hits']):
         return 'code_agent'
+    if _should_run_architecture_agent(state['focus'], state['prioritized_hits']):
+        return 'architecture_agent'
     return 'synthesis_agent'
 
 
 
 def _code_node(state: _AnswerGraphState) -> dict[str, Any]:
-    code_execution = _run_code_agent_pipeline(
+    investigation_role = _resolve_investigation_agent_role(state['focus']) or 'code_agent'
+    code_execution = _run_investigation_agent_pipeline(
         repo_id=state['repo_id'],
         question=state['question'],
         prioritized_hits=state['prioritized_hits'],
@@ -247,14 +256,23 @@ def _code_node(state: _AnswerGraphState) -> dict[str, Any]:
     code_investigation = code_outcome.value
     extra_context_lines = None
     code_context_used = False
-    if code_investigation is not None and should_use_code_investigation_context(code_investigation):
-        extra_context_lines = build_code_investigation_context_lines(code_investigation)
-        code_context_used = True
+    if code_investigation is not None and _resolve_investigation_agent_role(state['focus']) is not None:
+        if _should_use_investigation_context(state['focus'], code_investigation):
+            extra_context_lines = _build_investigation_context_lines(state['focus'], code_investigation)
+            code_context_used = True
 
     agent_trace = list(state['agent_trace'])
-    agent_trace.append(_build_code_agent_record(code_outcome))
+    agent_trace.append(
+        _build_investigation_agent_record(
+            code_outcome,
+            role=investigation_role,
+            focus=state['focus'],
+        )
+    )
     shared_context = dict(state['shared_context'])
-    shared_context['code_agent_enabled'] = True
+    shared_context['code_agent_enabled'] = investigation_role == 'code_agent'
+    shared_context['architecture_agent_enabled'] = investigation_role == 'architecture_agent'
+    shared_context['investigation_agent_role'] = investigation_role
     shared_context['code_agent_cache_hit'] = code_investigation.cache_hit if code_investigation is not None else False
     shared_context['code_agent_confidence'] = code_investigation.confidence_level if code_investigation is not None else 'none'
     shared_context['code_agent_relevance_score'] = code_investigation.relevance_score if code_investigation is not None else 0.0
@@ -268,9 +286,15 @@ def _code_node(state: _AnswerGraphState) -> dict[str, Any]:
         'code_outcome': code_outcome,
         'code_investigation': code_investigation,
         'extra_context_lines': extra_context_lines,
+        'investigation_agent_role': investigation_role,
         'agent_trace': agent_trace,
         'shared_context': shared_context,
     }
+
+
+def _architecture_node(state: _AnswerGraphState) -> dict[str, Any]:
+    """架构问题沿用同一套调查产物，但在图中保持独立节点。"""
+    return _code_node(state)
 
 
 
@@ -280,6 +304,10 @@ def _synthesis_node(state: _AnswerGraphState) -> dict[str, Any]:
     shared_context = dict(state['shared_context'])
     if 'code_agent_enabled' not in shared_context:
         shared_context['code_agent_enabled'] = False
+    if 'architecture_agent_enabled' not in shared_context:
+        shared_context['architecture_agent_enabled'] = False
+    if 'investigation_agent_role' not in shared_context:
+        shared_context['investigation_agent_role'] = 'none'
     if 'code_agent_cache_hit' not in shared_context:
         shared_context['code_agent_cache_hit'] = False
     if 'code_agent_confidence' not in shared_context:
@@ -314,6 +342,9 @@ def _synthesis_node(state: _AnswerGraphState) -> dict[str, Any]:
             use_llm=state['use_llm'],
             llm_stream=state['llm_stream'],
             on_llm_chunk=state['on_llm_chunk'],
+            relation_chain_details=(
+                code_investigation.relation_chain_details if code_investigation is not None else None
+            ),
         )
 
     agent_trace.append(
@@ -323,6 +354,7 @@ def _synthesis_node(state: _AnswerGraphState) -> dict[str, Any]:
             prioritized_hits=state['prioritized_hits'],
             code_investigation=code_investigation,
             code_context_used=bool(state.get('extra_context_lines')),
+            investigation_agent_role=state.get('investigation_agent_role'),
         )
     )
     return {
@@ -339,6 +371,7 @@ def _verifier_node(state: _AnswerGraphState) -> dict[str, Any]:
         selected_lines=state['selected_lines'],
         code_investigation=state.get('code_investigation'),
         code_context_used=bool(state.get('extra_context_lines')),
+        investigation_agent_role=state.get('investigation_agent_role'),
     )
     agent_trace = list(state['agent_trace'])
     agent_trace.append(_build_verifier_record(verification_result))
@@ -363,6 +396,7 @@ def _revision_node(state: _AnswerGraphState) -> dict[str, Any]:
         selected_lines=state['selected_lines'],
         code_investigation=state.get('code_investigation'),
         code_context_used=bool(state.get('extra_context_lines')),
+        investigation_agent_role=state.get('investigation_agent_role'),
     )
     agent_trace = list(state['agent_trace'])
     agent_trace.append(_build_revision_record(revision_applied, state['verification_result']))
@@ -388,6 +422,7 @@ def _recovery_node(state: _AnswerGraphState) -> dict[str, Any]:
         prioritized_hits=state['prioritized_hits'],
         selected_lines=state['selected_lines'],
         code_investigation=state.get('code_investigation'),
+        investigation_agent_role=state.get('investigation_agent_role'),
     )
     prioritized_hits = state['prioritized_hits']
     selected_lines = state['selected_lines']
@@ -410,7 +445,10 @@ def _recovery_node(state: _AnswerGraphState) -> dict[str, Any]:
         shared_context['retrieval_doc_types'] = [hit.document.doc_type for hit in prioritized_hits[:5]]
         shared_context['selected_line_count'] = len(selected_lines)
         if recovery_result.code_execution is not None:
-            shared_context['code_agent_enabled'] = True
+            shared_context['code_agent_enabled'] = state.get('investigation_agent_role') == 'code_agent'
+            shared_context['architecture_agent_enabled'] = (
+                state.get('investigation_agent_role') == 'architecture_agent'
+            )
             shared_context['code_recovery_attempted'] = recovery_result.code_execution.recovery_attempted
             shared_context['code_recovery_improved'] = recovery_result.code_execution.recovery_improved
             shared_context['code_recovery_hit_count'] = recovery_result.code_execution.recovery_hit_count
@@ -441,6 +479,9 @@ def _recovery_node(state: _AnswerGraphState) -> dict[str, Any]:
                 use_llm=False,
                 llm_stream=False,
                 on_llm_chunk=None,
+                relation_chain_details=(
+                    code_investigation.relation_chain_details if code_investigation is not None else None
+                ),
             )
         else:
             answer_result = _build_empty_answer_result(
@@ -456,6 +497,7 @@ def _recovery_node(state: _AnswerGraphState) -> dict[str, Any]:
             selected_lines=selected_lines,
             code_investigation=code_investigation,
             code_context_used=bool(extra_context_lines),
+            investigation_agent_role=state.get('investigation_agent_role'),
         )
         shared_context['verification_verdict'] = verification_result.verdict
         shared_context['verification_support_score'] = verification_result.support_score

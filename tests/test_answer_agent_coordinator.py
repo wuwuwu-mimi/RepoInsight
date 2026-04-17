@@ -17,13 +17,14 @@ from tests.test_summary_builders import _build_result
 
 
 
-def test_build_default_answer_agent_plan_returns_seven_roles() -> None:
+def test_build_default_answer_agent_plan_returns_eight_roles() -> None:
     plan = build_default_answer_agent_plan()
 
     assert [item.role for item in plan] == [
         'router_agent',
         'retrieval_agent',
         'code_agent',
+        'architecture_agent',
         'synthesis_agent',
         'verifier_agent',
         'recovery_agent',
@@ -31,10 +32,11 @@ def test_build_default_answer_agent_plan_returns_seven_roles() -> None:
     ]
     assert plan[1].depends_on == ['router_agent']
     assert plan[2].depends_on == ['retrieval_agent']
-    assert plan[3].depends_on == ['retrieval_agent', 'code_agent']
-    assert plan[4].depends_on == ['synthesis_agent']
-    assert plan[5].depends_on == ['verifier_agent']
-    assert plan[6].depends_on == ['recovery_agent']
+    assert plan[3].depends_on == ['retrieval_agent']
+    assert plan[4].depends_on == ['retrieval_agent', 'code_agent', 'architecture_agent']
+    assert plan[5].depends_on == ['synthesis_agent']
+    assert plan[6].depends_on == ['verifier_agent']
+    assert plan[7].depends_on == ['recovery_agent']
 
 
 

@@ -104,6 +104,94 @@ def test_infer_project_profile_extracts_api_routes_for_python_and_javascript() -
     assert 'service.health' in js_route.called_symbols
 
 
+def test_infer_project_profile_extracts_python_service_and_repository_delegate_edges() -> None:
+    repo_info = _build_repo_info()
+    scan_result = _build_scan_result(['app.py'])
+    key_file_contents = [
+        KeyFileContent(
+            path='app.py',
+            size_bytes=960,
+            content=(
+                'from fastapi import APIRouter\n\n'
+                'router = APIRouter()\n\n'
+                '@router.post("/session")\n'
+                'def create_session(payload):\n'
+                '    return auth_service.login_user(payload)\n\n'
+                'class AuthService:\n'
+                '    def __init__(self, session_repo):\n'
+                '        self.session_repo = session_repo\n\n'
+                '    def login_user(self, payload):\n'
+                '        return self.session_repo.persist_session(payload)\n\n'
+                'def build_service(session_repo):\n'
+                '    return AuthService(session_repo).login_user({"user_id": 1})\n'
+            ),
+        )
+    ]
+
+    profile = infer_project_profile(repo_info, scan_result, key_file_contents)
+
+    route = next(item for item in profile.api_route_summaries if item.route_path == '/session')
+    assert 'auth_service.login_user' in route.called_symbols
+
+    service_method = next(item for item in profile.function_summaries if item.qualified_name == 'AuthService.login_user')
+    assert 'session_repo.persist_session' in service_method.called_symbols
+
+    builder_function = next(item for item in profile.function_summaries if item.qualified_name == 'build_service')
+    assert 'AuthService.login_user' in builder_function.called_symbols
+
+    relation_edges = {
+        (item.source_ref, item.target_ref, item.relation_type)
+        for item in profile.code_relation_edges
+    }
+    assert ('create_session', 'auth_service.login_user', 'delegate_service') in relation_edges
+    assert ('AuthService.login_user', 'session_repo.persist_session', 'delegate_repository') in relation_edges
+    assert ('build_service', 'AuthService.login_user', 'delegate_service') in relation_edges
+
+
+def test_infer_project_profile_extracts_javascript_service_and_repository_delegate_edges() -> None:
+    repo_info = _build_repo_info()
+    scan_result = _build_scan_result(['src/routes.ts'])
+    key_file_contents = [
+        KeyFileContent(
+            path='src/routes.ts',
+            size_bytes=1200,
+            content=(
+                "router.post('/session', createSession)\n\n"
+                'async function createSession(payload) {\n'
+                '  return authService.loginUser(payload)\n'
+                '}\n\n'
+                'class AuthService {\n'
+                '  async loginUser(payload) {\n'
+                '    return this.sessionRepository.persistSession(payload)\n'
+                '  }\n'
+                '}\n\n'
+                'const buildService = async (payload) => {\n'
+                '  return new AuthService().loginUser(payload)\n'
+                '}\n'
+            ),
+        )
+    ]
+
+    profile = infer_project_profile(repo_info, scan_result, key_file_contents)
+
+    route = next(item for item in profile.api_route_summaries if item.route_path == '/session')
+    assert 'authService.loginUser' in route.called_symbols
+
+    service_method = next(item for item in profile.function_summaries if item.qualified_name == 'AuthService.loginUser')
+    assert 'sessionRepository.persistSession' in service_method.called_symbols
+
+    builder_function = next(item for item in profile.function_summaries if item.qualified_name == 'buildService')
+    assert 'AuthService.loginUser' in builder_function.called_symbols
+
+    relation_edges = {
+        (item.source_ref, item.target_ref, item.relation_type)
+        for item in profile.code_relation_edges
+    }
+    assert ('createSession', 'authService.loginUser', 'delegate_service') in relation_edges
+    assert ('AuthService.loginUser', 'sessionRepository.persistSession', 'delegate_repository') in relation_edges
+    assert ('buildService', 'AuthService.loginUser', 'delegate_service') in relation_edges
+
+
 def test_build_knowledge_documents_includes_api_route_summary_docs() -> None:
     repo_info = _build_repo_info()
     scan_result = _build_scan_result(['app.py'])

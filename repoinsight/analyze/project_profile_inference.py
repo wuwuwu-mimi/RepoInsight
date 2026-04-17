@@ -2,6 +2,7 @@ import json
 import re
 import tomllib
 
+from repoinsight.analyze.code_semantics import infer_call_relation_type, infer_code_symbol_role
 from repoinsight.analyze.code_index_inference import extract_code_index
 from repoinsight.models.analysis_model import (
     CodeEntity,
@@ -185,6 +186,9 @@ def _build_code_entities(
             tags.append('method')
         if item.is_async:
             tags.append('async')
+        role = infer_code_symbol_role(item.qualified_name)
+        if role:
+            tags.append(role)
         add_entity(
             CodeEntity(
                 entity_kind='function',
@@ -198,6 +202,10 @@ def _build_code_entities(
         )
 
     for item in class_summaries:
+        tags = ['class']
+        role = infer_code_symbol_role(item.qualified_name)
+        if role:
+            tags.append(role)
         add_entity(
             CodeEntity(
                 entity_kind='class',
@@ -206,7 +214,7 @@ def _build_code_entities(
                 source_path=item.source_path,
                 language_scope=item.language_scope,
                 location=_build_location(item.source_path, item.line_start, item.line_end),
-                tags=['class'],
+                tags=tags,
             )
         )
 
@@ -316,7 +324,7 @@ def _build_code_relation_edges(
                 CodeRelationEdge(
                     source_ref=source_ref,
                     target_ref=called_symbol,
-                    relation_type='call',
+                    relation_type=infer_call_relation_type(called_symbol),
                     source_path=item.source_path,
                     line_number=item.line_start,
                 )
@@ -347,7 +355,7 @@ def _build_code_relation_edges(
                 CodeRelationEdge(
                     source_ref=item.handler_qualified_name,
                     target_ref=called_symbol,
-                    relation_type='call',
+                    relation_type=infer_call_relation_type(called_symbol),
                     source_path=item.source_path,
                     line_number=item.line_number,
                 )

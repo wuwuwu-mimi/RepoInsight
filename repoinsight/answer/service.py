@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from collections.abc import Callable
 
@@ -33,6 +35,13 @@ FOCUS_PREFIXES = {
     'api': ('路由路径：', 'HTTP 方法：', '处理函数：', '处理限定名：', '代码位置：', '调用：', '摘要：'),
     'implementation': ('符号名称：', '限定名：', '函数签名：', '代码位置：', '调用：', '方法：', '摘要：'),
     'generic': ('摘要：', '关键结论：', '职责：', '关键符号：', '模块依赖：'),
+}
+
+CHUNK_DOC_TYPES = {
+    'function_body_chunk',
+    'class_body_chunk',
+    'route_handler_chunk',
+    'config_chunk',
 }
 
 def answer_repo_question(
@@ -114,6 +123,7 @@ def _build_answer_result_from_context(
     use_llm: bool,
     llm_stream: bool,
     on_llm_chunk: Callable[[str], None] | None,
+    relation_chain_details: list[CodeRelationChain] | None = None,
 ) -> RepoAnswerResult:
     """基于已完成的路由与检索上下文构建最终回答结果。"""
     evidence = [
@@ -174,7 +184,12 @@ def _build_answer_result_from_context(
             fallback_used = llm_attempted
     elif focus == 'api':
         extractive_answer = _build_api_answer(prioritized_hits, selected_lines)
-        extractive_answer = _append_extra_context_notes(extractive_answer, extra_context_lines)
+        extractive_answer = _append_extra_context_notes(
+            extractive_answer,
+            extra_context_lines,
+            focus=focus,
+            relation_chain_details=relation_chain_details,
+        )
         evidence_lines = _merge_evidence_lines(
             _build_evidence_lines(prioritized_hits[:4]),
             extra_context_lines,
@@ -198,7 +213,41 @@ def _build_answer_result_from_context(
             fallback_used = llm_attempted
     elif focus == 'implementation':
         extractive_answer = _build_implementation_answer(prioritized_hits, selected_lines)
-        extractive_answer = _append_extra_context_notes(extractive_answer, extra_context_lines)
+        extractive_answer = _append_extra_context_notes(
+            extractive_answer,
+            extra_context_lines,
+            focus=focus,
+            relation_chain_details=relation_chain_details,
+        )
+        evidence_lines = _merge_evidence_lines(
+            _build_evidence_lines(prioritized_hits[:4]),
+            extra_context_lines,
+        )
+        llm_answer, llm_attempted, llm_error = _try_build_llm_answer(
+            repo_id=repo_id,
+            question=question,
+            draft_answer=extractive_answer,
+            evidence_lines=evidence_lines,
+            use_llm=use_llm,
+            llm_stream=llm_stream,
+            on_llm_chunk=on_llm_chunk,
+        )
+        if llm_answer is not None:
+            answer = llm_answer
+            answer_mode = 'llm'
+            fallback_used = False
+        else:
+            answer = extractive_answer
+            answer_mode = 'extractive'
+            fallback_used = llm_attempted
+    elif focus == 'architecture':
+        extractive_answer = _build_architecture_answer(prioritized_hits, selected_lines)
+        extractive_answer = _append_extra_context_notes(
+            extractive_answer,
+            extra_context_lines,
+            focus=focus,
+            relation_chain_details=relation_chain_details,
+        )
         evidence_lines = _merge_evidence_lines(
             _build_evidence_lines(prioritized_hits[:4]),
             extra_context_lines,
@@ -268,6 +317,8 @@ def _resolve_retrieval_top_k(focus: str, top_k: int) -> int:
     """根据问题焦点决定实际检索数量。"""
     if focus in {'overview', 'startup'}:
         return max(top_k, 6)
+    if focus == 'architecture':
+        return max(top_k, 8)
     return top_k
 
 
@@ -278,7 +329,18 @@ def _infer_question_focus(question: str) -> str:
         return 'api'
     if re.search(r'/[a-z0-9_\-/{}/:]+', lowered) and any(token in lowered for token in ('接口', '路由', 'api', 'endpoint')):
         return 'api'
-    for focus, keywords in QUESTION_FOCUS_KEYWORDS.items():
+    focus_match_order = (
+        'implementation',
+        'architecture',
+        'startup',
+        'entrypoint',
+        'env',
+        'service',
+        'config',
+        'overview',
+    )
+    for focus in focus_match_order:
+        keywords = QUESTION_FOCUS_KEYWORDS.get(focus, ())
         if any(keyword in lowered for keyword in keywords):
             return focus
     return 'generic'
@@ -291,6 +353,12 @@ def _select_supporting_lines(question: str, hits: list[SearchHit], focus: str, m
 
     for hit in hits[:4]:
         source = hit.document.source_path or '仓库级文档'
+        if hit.document.doc_type in CHUNK_DOC_TYPES:
+            for chunk_score, chunk_line in _collect_chunk_supporting_candidates(
+                question_tokens=question_tokens,
+                hit=hit,
+            ):
+                candidates.append((chunk_score, f'[{hit.document.doc_type} | {source}] {chunk_line}'))
         for raw_line in hit.document.content.splitlines():
             line = raw_line.strip()
             if not line:
@@ -341,6 +409,10 @@ def _select_supporting_lines(question: str, hits: list[SearchHit], focus: str, m
 
 def _supporting_line_doc_type_bonus(doc_type: str) -> int:
     """为更适合直接回答的文档类型提供基础分。"""
+    if doc_type in {'function_body_chunk', 'route_handler_chunk'}:
+        return 4
+    if doc_type in {'class_body_chunk', 'config_chunk'}:
+        return 3
     if doc_type in {'function_summary', 'api_route_summary'}:
         return 3
     if doc_type in {'class_summary', 'entrypoint_summary', 'config_summary'}:
@@ -387,21 +459,35 @@ def _prioritize_hits_for_focus(hits: list[SearchHit], focus: str) -> list[Search
             'config_summary': 2,
         },
         'env': {
+            'config_chunk': 0,
             'config_summary': 0,
             'entrypoint_summary': 1,
             'key_file_summary': 2,
         },
         'api': {
-            'api_route_summary': 0,
-            'function_summary': 1,
-            'key_file_summary': 2,
-            'entrypoint_summary': 3,
+            'route_handler_chunk': 0,
+            'api_route_summary': 1,
+            'function_body_chunk': 2,
+            'function_summary': 3,
+            'key_file_summary': 4,
+            'entrypoint_summary': 5,
         },
         'implementation': {
-            'function_summary': 0,
-            'class_summary': 1,
+            'function_body_chunk': 0,
+            'function_summary': 1,
+            'class_body_chunk': 2,
+            'class_summary': 3,
+            'key_file_summary': 4,
+            'entrypoint_summary': 5,
+        },
+        'architecture': {
+            'subproject_summary': 0,
+            'repo_summary': 1,
             'key_file_summary': 2,
-            'entrypoint_summary': 3,
+            'class_summary': 3,
+            'function_summary': 4,
+            'api_route_summary': 5,
+            'entrypoint_summary': 6,
         },
     }
     priority_map = doc_type_priority.get(focus, {})
@@ -554,6 +640,114 @@ def _collect_prefixed_lines(
     return collected
 
 
+def _collect_chunk_supporting_candidates(
+    *,
+    question_tokens: list[str],
+    hit: SearchHit,
+) -> list[tuple[int, str]]:
+    """从 chunk 文档中挑出更适合直接展示的源码行。"""
+    candidates: list[tuple[int, str]] = []
+    for line in _extract_code_block_lines(hit.document.content):
+        lowered_line = line.lower()
+        score = _supporting_line_doc_type_bonus(hit.document.doc_type) + 2
+        score += sum(1 for token in question_tokens if token in lowered_line)
+        score += _score_precise_supporting_line(question_tokens, lowered_line)
+        if any(marker in lowered_line for marker in ('def ', 'class ', 'return ', '@', 'function ', 'async ')):
+            score += 2
+        candidates.append((score, line))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[:3]
+
+
+def _extract_code_block_lines(content: str, *, max_lines: int = 4) -> list[str]:
+    """从 ```text``` 代码块中提取几行源码预览。"""
+    inside_block = False
+    lines: list[str] = []
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith('```'):
+            if inside_block:
+                break
+            inside_block = True
+            continue
+        if not inside_block or not stripped:
+            continue
+        lines.append(stripped)
+        if len(lines) >= max_lines:
+            break
+    return lines
+
+
+def _collect_chunk_locations(
+    hits: list[SearchHit],
+    allowed_doc_types: set[str],
+    *,
+    limit: int,
+) -> list[str]:
+    """收集 chunk 文档的源码位置，便于回答直接指路。"""
+    chunk_hits = [hit for hit in hits if hit.document.doc_type in allowed_doc_types]
+    return _collect_prefixed_lines(chunk_hits, '代码位置：', limit=limit)
+
+
+def _collect_chunk_preview_lines(
+    hits: list[SearchHit],
+    allowed_doc_types: set[str],
+    *,
+    limit: int,
+) -> list[str]:
+    """收集 chunk 文档中的关键源码行。"""
+    previews: list[str] = []
+    seen: set[str] = set()
+    for hit in hits:
+        if hit.document.doc_type not in allowed_doc_types:
+            continue
+        for line in _extract_code_block_lines(hit.document.content, max_lines=3):
+            if line in seen:
+                continue
+            seen.add(line)
+            previews.append(line)
+            if len(previews) >= limit:
+                return previews
+    return previews
+
+
+def _build_chunk_evidence_lines(
+    hits: list[SearchHit],
+    allowed_doc_types: set[str],
+    *,
+    limit: int,
+) -> list[str]:
+    """把 chunk 文档整理成 evidence 区可直接展示的证据行。"""
+    evidence: list[str] = []
+    seen: set[str] = set()
+    for hit in hits:
+        if hit.document.doc_type not in allowed_doc_types:
+            continue
+        source = hit.document.source_path or '仓库级文档'
+        location = _first_prefixed_line_value(hit.document.content, '代码位置：') or '未知位置'
+        preview = ' | '.join(_extract_code_block_lines(hit.document.content, max_lines=2))
+        line = f'[{hit.document.doc_type} | {source}] 代码位置：{location}'
+        if preview:
+            line += f'；源码片段：{preview}'
+        if line in seen:
+            continue
+        seen.add(line)
+        evidence.append(line)
+        if len(evidence) >= limit:
+            break
+    return evidence
+
+
+def _first_prefixed_line_value(content: str, prefix: str) -> str | None:
+    """读取正文里第一条指定前缀的值。"""
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip()
+            return value or None
+    return None
+
+
 def _extract_readme_highlights(hits: list[SearchHit], limit: int = 3) -> list[str]:
     """从 README 文档中提取更适合直接回答项目概览的问题句子。"""
     highlights: list[str] = []
@@ -618,6 +812,8 @@ def _build_api_answer(hits: list[SearchHit], selected_lines: list[str]) -> str:
     locations = _collect_prefixed_lines(hits, '代码位置：', limit=3)
     called_symbols = _collect_prefixed_lines(hits, '调用：', limit=3)
     summaries = _collect_prefixed_lines(hits, '摘要：', limit=3)
+    chunk_locations = _collect_chunk_locations(hits, {'route_handler_chunk', 'function_body_chunk'}, limit=3)
+    chunk_previews = _collect_chunk_preview_lines(hits, {'route_handler_chunk', 'function_body_chunk'}, limit=3)
 
     conclusions: list[str] = []
     if route_paths and http_methods:
@@ -635,10 +831,15 @@ def _build_api_answer(hits: list[SearchHit], selected_lines: list[str]) -> str:
         conclusions.append(f'优先关注这些处理函数：{_join_items(handler_names[:3])}。')
     if called_symbols:
         conclusions.append(f'处理流程进一步调用了：{_join_items(called_symbols[:3])}。')
+    if chunk_locations:
+        conclusions.append(f'已命中更贴近实现的源码片段，可以先看：{_join_items(chunk_locations[:2])}。')
+    if chunk_previews:
+        conclusions.append(f'从源码片段可直接看到：{_join_items(chunk_previews[:2])}。')
     if locations:
         conclusions.append(f'可以先回到这些代码位置核对：{_join_items(locations[:3])}。')
 
     evidence = []
+    evidence.extend(_build_chunk_evidence_lines(hits, {'route_handler_chunk', 'function_body_chunk'}, limit=4))
     for prefix in ('路由路径：', 'HTTP 方法：', '处理函数：', '处理限定名：', '代码位置：', '调用：', '摘要：'):
         evidence.extend(_collect_prefixed_lines(hits, prefix, limit=2, keep_prefix=True))
     evidence.extend(selected_lines[:2])
@@ -663,6 +864,8 @@ def _build_implementation_answer(hits: list[SearchHit], selected_lines: list[str
     called_symbols = _collect_prefixed_lines(hits, '调用：', limit=3)
     class_methods = _collect_prefixed_lines(hits, '方法：', limit=2)
     summaries = _collect_prefixed_lines(hits, '摘要：', limit=3)
+    chunk_locations = _collect_chunk_locations(hits, {'function_body_chunk', 'class_body_chunk'}, limit=3)
+    chunk_previews = _collect_chunk_preview_lines(hits, {'function_body_chunk', 'class_body_chunk'}, limit=3)
 
     conclusions: list[str] = []
     if summaries:
@@ -681,10 +884,15 @@ def _build_implementation_answer(hits: list[SearchHit], selected_lines: list[str
         conclusions.append(f'它们进一步涉及的调用包括：{_join_items(called_symbols[:3])}。')
     if class_methods:
         conclusions.append(f'相关类的方法线索包括：{_join_items(class_methods[:2])}。')
+    if chunk_locations:
+        conclusions.append(f'已命中更贴近实现的源码片段，可以先看：{_join_items(chunk_locations[:2])}。')
+    if chunk_previews:
+        conclusions.append(f'从源码片段可直接看到：{_join_items(chunk_previews[:2])}。')
     if locations:
         conclusions.append(f'可以先回到这些代码位置核对：{_join_items(locations[:3])}。')
 
     evidence = []
+    evidence.extend(_build_chunk_evidence_lines(hits, {'function_body_chunk', 'class_body_chunk'}, limit=4))
     for prefix in ('符号名称：', '限定名：', '函数签名：', '代码位置：', '调用：', '方法：', '摘要：'):
         evidence.extend(_collect_prefixed_lines(hits, prefix, limit=2, keep_prefix=True))
     evidence.extend(selected_lines[:2])
@@ -692,6 +900,89 @@ def _build_implementation_answer(hits: list[SearchHit], selected_lines: list[str
     uncertainties = ['当前结论基于静态代码摘要与检索证据，尚未结合运行时调用链做动态验证。']
     if not called_symbols:
         uncertainties.append('当前尚未提炼出足够完整的调用链，复杂功能仍建议回到源文件继续展开查看。')
+
+    return format_structured_answer(
+        conclusions=conclusions[:5],
+        evidence=evidence[:8],
+        uncertainties=uncertainties,
+    )
+
+
+def _build_architecture_answer(hits: list[SearchHit], selected_lines: list[str]) -> str:
+    """按架构视角组织子项目、模块依赖和关键实现符号。"""
+    subproject_roots = _clean_sentence_items(_collect_prefixed_lines(hits, '子项目根目录：', limit=4))
+    subproject_types = _clean_sentence_items(_collect_prefixed_lines(hits, '子项目类型：', limit=3))
+    subproject_languages = _clean_sentence_items(_collect_prefixed_lines(hits, '语言范围：', limit=3))
+    subproject_configs = _clean_sentence_items(_collect_prefixed_lines(hits, '配置文件：', limit=3))
+    subproject_entrypoints = _clean_sentence_items(_collect_prefixed_lines(hits, '入口文件：', limit=3))
+    owned_subprojects = _clean_sentence_items(_collect_prefixed_lines(hits, '所属子项目：', limit=4))
+    code_symbols = _clean_sentence_items(_collect_prefixed_lines(hits, '关键符号：', limit=4))
+    module_relations = _clean_sentence_items(_collect_prefixed_lines(hits, '模块依赖：', limit=4))
+    repo_subprojects = _clean_sentence_items(_collect_prefixed_lines(hits, '子项目：', limit=2))
+    repo_relation_counts = _clean_sentence_items(_collect_prefixed_lines(hits, '模块依赖关系数量：', limit=1))
+    summaries = _clean_sentence_items(_collect_prefixed_lines(hits, '摘要：', limit=3))
+
+    conclusions: list[str] = []
+    if subproject_roots:
+        conclusions.append(f'当前最相关的子项目或模块入口包括：{_join_items(subproject_roots[:3])}。')
+    elif owned_subprojects:
+        conclusions.append(f'当前命中的实现线索主要落在这些子项目：{_join_items(owned_subprojects[:3])}。')
+    elif repo_subprojects:
+        conclusions.append(f'仓库当前识别出的子项目概览包括：{_join_items(repo_subprojects[:2])}。')
+    elif summaries:
+        conclusions.append(f'当前最直接的架构线索是：{_join_items(summaries[:2])}。')
+    else:
+        conclusions.append('当前已命中架构相关文档，但还没有抽取到足够明确的子项目或模块摘要。')
+
+    if module_relations:
+        conclusions.append(f'当前最值得优先核对的模块依赖包括：{_join_items(module_relations[:3])}。')
+    elif repo_relation_counts:
+        conclusions.append(f'仓库级分析里已抽取到 {repo_relation_counts[0]} 条模块依赖关系，可继续沿命中文档展开。')
+
+    if code_symbols:
+        conclusions.append(f'关键实现符号主要集中在：{_join_items(code_symbols[:3])}。')
+
+    stack_parts: list[str] = []
+    if subproject_types:
+        stack_parts.append(f'子项目类型包括 {_join_items(subproject_types[:2])}')
+    if subproject_languages:
+        stack_parts.append(f'语言范围包括 {_join_items(subproject_languages[:2])}')
+    if stack_parts:
+        conclusions.append(f'从模块形态看，{"；".join(stack_parts)}。')
+
+    path_parts: list[str] = []
+    if subproject_entrypoints:
+        path_parts.append(f'入口文件有 {_join_items(subproject_entrypoints[:2])}')
+    if subproject_configs:
+        path_parts.append(f'配置文件有 {_join_items(subproject_configs[:2])}')
+    if path_parts:
+        conclusions.append(f'继续梳理时可以优先关注这些路径：{"；".join(path_parts)}。')
+
+    if len(conclusions) < 2 and selected_lines:
+        conclusions.extend(_strip_source_prefix(line) for line in selected_lines[:2])
+
+    evidence = []
+    for prefix in (
+        '子项目根目录：',
+        '子项目类型：',
+        '语言范围：',
+        '配置文件：',
+        '入口文件：',
+        '所属子项目：',
+        '关键符号：',
+        '模块依赖：',
+        '子项目：',
+        '模块依赖关系数量：',
+        '摘要：',
+    ):
+        evidence.extend(_collect_prefixed_lines(hits, prefix, limit=2, keep_prefix=True))
+    evidence.extend(selected_lines[:2])
+
+    uncertainties = ['当前结论基于静态结构摘要与检索证据，尚未结合运行时调用或真实部署拓扑验证。']
+    if not module_relations:
+        uncertainties.append('当前尚未拿到足够完整的模块依赖明细，复杂项目仍建议继续沿实现链路和配置文件展开核对。')
+    if not subproject_roots and not owned_subprojects:
+        uncertainties.append('当前命中结果对子项目边界的描述仍然有限，后续可以补更多子项目级摘要。')
 
     return format_structured_answer(
         conclusions=conclusions[:5],
@@ -770,7 +1061,13 @@ def _merge_evidence_lines(
     return merged
 
 
-def _append_extra_context_notes(answer_text: str, extra_context_lines: list[str] | None) -> str:
+def _append_extra_context_notes(
+    answer_text: str,
+    extra_context_lines: list[str] | None,
+    *,
+    focus: str = 'implementation',
+    relation_chain_details: list[CodeRelationChain] | None = None,
+) -> str:
     """把 code_agent 等额外线索附加到抽取式回答尾部。"""
     if not extra_context_lines:
         return answer_text
@@ -780,21 +1077,63 @@ def _append_extra_context_notes(answer_text: str, extra_context_lines: list[str]
         return answer_text
 
     formatted_lines = [line.removeprefix('[code_agent] ').strip() for line in note_lines]
-    relation_chains = _extract_relation_chain_lines(formatted_lines)
-    supplemental_lines = [line for line in formatted_lines if line not in relation_chains][:3]
+    relation_chains = _build_relation_chain_lines_from_details(relation_chain_details)
+    extracted_relation_chains = _extract_relation_chain_lines(formatted_lines)
+    if not relation_chains:
+        relation_chains = extracted_relation_chains
+    trace_step_lines = _extract_trace_step_lines(formatted_lines)
+    supplemental_lines = [
+        line for line in formatted_lines
+        if line not in extracted_relation_chains and line not in trace_step_lines
+    ][:3]
+    relation_section_title, process_section_title, supplemental_section_title = _resolve_extra_context_section_titles(focus)
 
     sections = [answer_text]
     if relation_chains:
         sections.append(
-            '实现链路：\n'
-            + '\n'.join(f'- {line.removeprefix("代表性关系链：").strip()}' for line in relation_chains[:2])
+            f'{relation_section_title}：\n'
+            + '\n'.join(
+                f'- {_format_relation_chain_line(line, focus=focus)}'
+                for line in relation_chains[:2]
+            )
+        )
+    if trace_step_lines:
+        sections.append(
+            f'{process_section_title}：\n'
+            + '\n'.join(
+                f'- {_format_trace_step_line(line, focus=focus)}'
+                for line in trace_step_lines[:3]
+            )
         )
     if supplemental_lines:
         sections.append(
-            '补充线索：\n'
+            f'{supplemental_section_title}：\n'
             + '\n'.join(f'- {line}' for line in supplemental_lines)
         )
     return '\n'.join(sections)
+
+
+def _build_relation_chain_lines_from_details(
+    relation_chain_details: list[CodeRelationChain] | None,
+) -> list[str]:
+    """优先把结构化关系链转成稳定的展示行，供回答拼接直接复用。"""
+    if not relation_chain_details:
+        return []
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in relation_chain_details:
+        if item.typed_text:
+            line = f'关系链类型：{item.typed_text}'
+        elif item.plain_text:
+            line = f'代表性关系链：{item.plain_text}'
+        else:
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    return lines
 
 
 def _extract_relation_chain_lines(lines: list[str]) -> list[str]:
@@ -804,6 +1143,11 @@ def _extract_relation_chain_lines(lines: list[str]) -> list[str]:
     for line in lines:
         normalized = line.strip()
         if not normalized:
+            continue
+        if normalized.startswith('关系链类型：'):
+            if normalized not in seen:
+                seen.add(normalized)
+                relation_lines.append(normalized)
             continue
         if normalized.startswith('代表性关系链：'):
             if normalized not in seen:
@@ -815,6 +1159,236 @@ def _extract_relation_chain_lines(lines: list[str]) -> list[str]:
                 seen.add(normalized)
                 relation_lines.append(normalized)
     return relation_lines
+
+
+def _extract_trace_step_lines(lines: list[str]) -> list[str]:
+    """从额外上下文中提取可转成自然语言过程说明的追踪步骤。"""
+    trace_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        normalized = line.strip()
+        if not normalized or normalized in seen:
+            continue
+        if normalized.startswith('[depth=') and ' -> ' in normalized:
+            seen.add(normalized)
+            trace_lines.append(normalized)
+    return trace_lines
+
+
+def _resolve_extra_context_section_titles(focus: str) -> tuple[str, str, str]:
+    """根据问题焦点决定额外上下文的区块标题。"""
+    title_map = {
+        'api': ('接口链路', '接口过程', '补充接口线索'),
+        'implementation': ('实现链路', '实现过程', '补充实现线索'),
+        'architecture': ('模块链路', '模块展开', '补充模块线索'),
+    }
+    return title_map.get(focus, ('实现链路', '实现过程', '补充线索'))
+
+
+def _format_relation_chain_line(line: str, *, focus: str = 'implementation') -> str:
+    """把关系链条目转换成更适合回答正文展示的文本。"""
+    chain_text = line.removeprefix('关系链类型：').removeprefix('代表性关系链：').strip()
+    typed_chain_steps = _parse_typed_relation_chain(chain_text)
+    if typed_chain_steps is not None:
+        return _format_typed_relation_chain(chain_text, typed_chain_steps, focus=focus)
+
+    chain_parts = [item.strip() for item in chain_text.split('->') if item.strip()]
+    if len(chain_parts) < 2:
+        return chain_text
+
+    if focus == 'architecture':
+        if len(chain_parts) == 2:
+            return (
+                f'{chain_text}（模块依赖从 {chain_parts[0]} 指向 {chain_parts[1]}，'
+                '可以先沿这条边界继续查看职责拆分）'
+            )
+
+        middle_text = f'，中间经过 {"、".join(chain_parts[1:-1])}' if len(chain_parts) > 2 else ''
+        return (
+            f'{chain_text}（模块链路从 {chain_parts[0]} 出发{middle_text}，'
+            f'最终落到 {chain_parts[-1]}，可据此继续核对职责与依赖方向）'
+        )
+
+    if focus == 'api' and '/' in chain_parts[0]:
+        tail_text = '，随后依次调用 ' + '、'.join(chain_parts[2:]) if len(chain_parts) > 2 else ''
+        return f'{chain_text}（请求先进入 {chain_parts[0]}，再由 {chain_parts[1]} 处理{tail_text}）'
+
+    tail_text = '，随后依次调用 ' + '、'.join(chain_parts[1:]) if len(chain_parts) > 1 else ''
+    if focus == 'api':
+        return f'{chain_text}（接口主处理链从 {chain_parts[0]} 开始{tail_text}）'
+    return f'{chain_text}（主实现流程从 {chain_parts[0]} 开始{tail_text}）'
+
+
+def _parse_typed_relation_chain(chain_text: str) -> list[tuple[str, str, str | None]] | None:
+    """把带关系类型的链路文本解析成边列表。"""
+    if '-[' not in chain_text:
+        return None
+
+    marker_pattern = re.compile(r'\s*-\[(?P<relation>[a-z_]+)\]->\s*')
+    start_match = marker_pattern.search(chain_text)
+    if start_match is None:
+        return None
+
+    current_label = chain_text[:start_match.start()].strip()
+    if not current_label:
+        return None
+    parsed_steps: list[tuple[str, str, str | None]] = []
+    current_position = start_match.start()
+    while True:
+        marker_match = marker_pattern.match(chain_text, current_position)
+        if marker_match is None:
+            break
+        relation_type = marker_match.group('relation').strip()
+        next_marker = marker_pattern.search(chain_text, marker_match.end())
+        target_label = chain_text[marker_match.end(): next_marker.start() if next_marker else len(chain_text)].strip()
+        if not target_label:
+            return None
+        parsed_steps.append((current_label, target_label, relation_type.strip()))
+        current_label = target_label
+        if next_marker is None:
+            break
+        current_position = next_marker.start()
+    return parsed_steps
+
+
+def _format_typed_relation_chain(
+    chain_text: str,
+    typed_steps: list[tuple[str, str, str | None]],
+    *,
+    focus: str,
+) -> str:
+    """把带关系类型的链路文本转成更自然的说明。"""
+    if not typed_steps:
+        return chain_text
+
+    explanation_parts = [
+        _build_relation_transition_text(source, target, relation_type or '', focus=focus)
+        for source, target, relation_type in typed_steps
+    ]
+    return f'{chain_text}（{"；".join(explanation_parts)}）'
+
+
+def _format_trace_step_line(line: str, *, focus: str = 'implementation') -> str:
+    """把追踪步骤转成更自然的过程说明。"""
+    trace_step = _parse_trace_step_line(line)
+    if trace_step is None:
+        return line
+
+    label = trace_step['label']
+    parent_label = trace_step['parent_label']
+    location = trace_step['location']
+    relation_type = trace_step['relation_type']
+    summary = _clean_trace_step_summary(trace_step['summary'], label=label, parent_label=parent_label)
+    location_text = f'（{location}）' if location else ''
+
+    if focus == 'api':
+        if parent_label:
+            return f'{_build_relation_transition_text(parent_label, label, relation_type, focus=focus)}{location_text}，{summary}。'
+        return f'接口入口先落到 {label}{location_text}，{summary}。'
+
+    if focus == 'architecture':
+        if parent_label:
+            return f'{_build_relation_transition_text(parent_label, label, relation_type, focus=focus)}{location_text}，{summary}。'
+        return f'当前模块链路先落在 {label}{location_text}，{summary}。'
+
+    if parent_label:
+        return f'{_build_relation_transition_text(parent_label, label, relation_type, focus=focus)}{location_text}，{summary}。'
+    return f'先定位到 {label}{location_text}，{summary}。'
+
+
+def _parse_trace_step_line(line: str) -> dict[str, str] | None:
+    """解析 code_agent 输出的追踪步骤行。"""
+    normalized = line.strip()
+    depth_match = re.match(r'^\[depth=(?P<depth>\d+)\]\s*', normalized)
+    if depth_match is None:
+        return None
+
+    body = normalized[depth_match.end():]
+    relation_type = ''
+    relation_match = re.match(r'^\[relation=(?P<relation>[a-z_]+)\]\s*', body)
+    if relation_match is not None:
+        relation_type = relation_match.group('relation')
+        body = body[relation_match.end():]
+    if ' -> ' not in body:
+        return None
+
+    head, summary = body.split(' -> ', maxsplit=1)
+    location = ''
+    if ' @ ' in head:
+        head, location = head.split(' @ ', maxsplit=1)
+        location = location.strip()
+
+    label = head.strip()
+    parent_label = ''
+    if ' <- ' in head:
+        label, parent_label = head.split(' <- ', maxsplit=1)
+        label = label.strip()
+        parent_label = parent_label.strip()
+
+    return {
+        'depth': depth_match.group('depth'),
+        'label': label,
+        'parent_label': parent_label,
+        'location': location,
+        'relation_type': relation_type,
+        'summary': summary.strip(),
+    }
+
+
+def _clean_trace_step_summary(summary: str, *, label: str, parent_label: str) -> str:
+    """尽量去掉追踪步骤摘要中的重复前缀，让正文更自然。"""
+    cleaned = summary.strip().rstrip('。')
+    if parent_label:
+        cleaned = cleaned.removeprefix(f'作为 {parent_label} 的下一跳，')
+    cleaned = cleaned.removeprefix(f'函数 {label} ')
+    cleaned = cleaned.removeprefix(f'类 {label} ')
+    cleaned = cleaned.removeprefix(f'接口 {label} 的')
+    return cleaned or summary.strip().rstrip('。')
+
+
+def _build_relation_transition_text(
+    parent_label: str,
+    label: str,
+    relation_type: str,
+    *,
+    focus: str,
+) -> str:
+    """根据关系类型生成更稳定的过程说明语句。"""
+    relation_type = relation_type or 'call'
+
+    if focus == 'api':
+        if relation_type == 'handle_route':
+            return f'请求从 {parent_label} 路由到 {label}'
+        if relation_type == 'delegate_service':
+            return f'从 {parent_label} 继续把业务处理交给服务 {label}'
+        if relation_type == 'delegate_repository':
+            return f'从 {parent_label} 继续把数据访问交给 {label}'
+        if relation_type == 'define_method':
+            return f'从 {parent_label} 继续落到类方法 {label}'
+        return f'从 {parent_label} 继续调用 {label}'
+
+    if focus == 'architecture':
+        if relation_type in {'import', 'import_module'}:
+            return f'{parent_label} 继续依赖模块 {label}'
+        if relation_type == 'delegate_service':
+            return f'{parent_label} 继续把业务链路交给服务 {label}'
+        if relation_type == 'delegate_repository':
+            return f'{parent_label} 继续把持久化链路交给 {label}'
+        if relation_type == 'handle_route':
+            return f'{parent_label} 继续把入口流量路由到 {label}'
+        if relation_type == 'define_method':
+            return f'{parent_label} 继续展开到方法 {label}'
+        return f'{parent_label} 继续依赖到 {label}'
+
+    if relation_type == 'delegate_service':
+        return f'从 {parent_label} 继续把业务处理交给服务 {label}'
+    if relation_type == 'delegate_repository':
+        return f'从 {parent_label} 继续把数据访问交给 {label}'
+    if relation_type == 'define_method':
+        return f'从 {parent_label} 继续展开到方法 {label}'
+    if relation_type == 'handle_route':
+        return f'从 {parent_label} 继续落到接口处理 {label}'
+    return f'从 {parent_label} 继续跟到 {label}'
 
 
 def _strip_source_prefix(line: str) -> str:

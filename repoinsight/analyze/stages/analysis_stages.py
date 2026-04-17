@@ -7,7 +7,8 @@ from repoinsight.analyze.project_profile_inference import infer_project_profile
 from repoinsight.analyze.stack_inference import infer_tech_stack
 from repoinsight.ingest.file_scanner import scan_repo
 from repoinsight.ingest.git_loader import clone_repo
-from repoinsight.ingest.repo_service import get_repo_info
+from repoinsight.ingest.repo_service import get_repo_metadata, get_repo_readme
+from repoinsight.utils.repo_util import to_info
 from repoinsight.models.analysis_model import AnalysisState
 from repoinsight.utils.check_util import check_url
 
@@ -28,8 +29,16 @@ def validate_analysis_url_stage(state: AnalysisState) -> AnalysisState:
 
 
 def fetch_repo_metadata_stage(state: AnalysisState) -> AnalysisState:
-    """获取仓库元数据与 README。"""
-    state.repo_info = get_repo_info(state.url)
+    """获取仓库基础元数据。"""
+    state.repo_info = to_info(get_repo_metadata(state.url), None)
+    return state
+
+
+def fetch_repo_readme_stage(state: AnalysisState) -> AnalysisState:
+    """在仓库元数据基础上补充 README 文本。"""
+    if state.repo_info is None:
+        raise RuntimeError('仓库元数据缺失，无法获取 README')
+    state.repo_info.readme = get_repo_readme(state.url)
     return state
 
 
@@ -101,6 +110,7 @@ def build_repo_insights_stage(state: AnalysisState) -> AnalysisState:
 ANALYSIS_STAGES: tuple[AnalysisStage, ...] = (
     validate_analysis_url_stage,
     fetch_repo_metadata_stage,
+    fetch_repo_readme_stage,
     clone_repository_stage,
     scan_repository_stage,
     read_key_files_stage,

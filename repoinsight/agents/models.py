@@ -5,6 +5,9 @@ from repoinsight.models.analysis_model import AnalysisRunResult
 from repoinsight.models.rag_model import IndexResult
 
 
+AgentPayloadValue = str | int | float | bool | list[str]
+
+
 class AgentStepSpec(BaseModel):
     """表示多 Agent 编排中的一个固定角色步骤。"""
 
@@ -25,6 +28,31 @@ class AgentStepSpec(BaseModel):
 
     # 是否具备未来并行执行的潜力；当前仅作为规划字段保留。
     can_run_in_parallel: bool = Field(default=False, description='是否可并行执行')
+
+
+class AgentTaskPacket(BaseModel):
+    """表示 planner_agent 分发给某个下游 Agent 的任务卡片。"""
+
+    # 任务接收方角色。
+    target_role: str = Field(..., description='任务目标 Agent')
+
+    # 任务标题，便于在 Trace / UI 中快速识别。
+    title: str = Field(..., description='任务标题')
+
+    # 当前任务的核心目标。
+    objective: str = Field(..., description='任务目标')
+
+    # 该任务依赖的上游 Agent 角色。
+    depends_on: list[str] = Field(default_factory=list, description='依赖的上游 Agent')
+
+    # 执行当前任务前应重点关注的输入。
+    required_inputs: list[str] = Field(default_factory=list, description='所需输入')
+
+    # 当前任务期望产出的结构化结果。
+    expected_outputs: list[str] = Field(default_factory=list, description='期望输出')
+
+    # planner 提供给下游 Agent 的交接备注。
+    handoff_notes: list[str] = Field(default_factory=list, description='交接说明')
 
 
 class AgentRunRecord(BaseModel):
@@ -59,6 +87,47 @@ class AgentRunRecord(BaseModel):
 
     # 当前 Agent 的执行耗时，单位毫秒。
     duration_ms: int | None = Field(default=None, description='执行耗时（毫秒）')
+
+    # 当前 Agent 的统一结构化产物，便于后续 CLI / UI / LangGraph 统一消费。
+    structured_output: 'AgentStructuredOutput | None' = Field(default=None, description='结构化输出')
+
+
+class AgentEvidenceItem(BaseModel):
+    """表示 Agent 输出中的一条结构化证据。"""
+
+    # 证据类型，例如 document、snippet、location、issue_tag。
+    kind: str = Field(default='text', description='证据类型')
+
+    # 证据标签，便于 CLI 或 UI 直接展示。
+    label: str = Field(..., description='证据标签')
+
+    # 证据对应的源文件路径。
+    source_path: str | None = Field(default=None, description='来源文件路径')
+
+    # 证据对应的源码位置或逻辑位置。
+    location: str | None = Field(default=None, description='证据位置')
+
+    # 证据摘要片段。
+    snippet: str | None = Field(default=None, description='证据片段')
+
+
+class AgentStructuredOutput(BaseModel):
+    """表示多 Agent 协作中统一的结构化输出协议。"""
+
+    # 当前 Agent 提炼出的核心结论。
+    conclusions: list[str] = Field(default_factory=list, description='核心结论')
+
+    # 当前 Agent 使用到的证据列表。
+    evidence: list[AgentEvidenceItem] = Field(default_factory=list, description='证据列表')
+
+    # 当前 Agent 主动暴露的不确定点或风险。
+    uncertainties: list[str] = Field(default_factory=list, description='不确定点')
+
+    # 建议下游 Agent 或调用方继续执行的动作。
+    next_actions: list[str] = Field(default_factory=list, description='后续动作建议')
+
+    # 结构化元数据，便于后续 UI / Trace / 评测直接读取。
+    metadata: dict[str, AgentPayloadValue] = Field(default_factory=dict, description='结构化元数据')
 
 
 class CoordinatedAnalysisResult(BaseModel):
@@ -129,6 +198,38 @@ class CodeTraceStep(BaseModel):
     # 当前步骤的上游标签，便于展示 route -> handler -> service 关系。
     parent_label: str | None = Field(default=None, description='上游步骤标签')
 
+    # 当前步骤与上游之间的关系类型，例如 handle_route、delegate_service。
+    relation_type: str | None = Field(default=None, description='与上游之间的关系类型')
+
+
+class CodeRelationEdge(BaseModel):
+    """表示关系链中的一条有类型的边。"""
+
+    # 当前边的起点标签。
+    source_label: str = Field(..., description='边起点标签')
+
+    # 当前边的终点标签。
+    target_label: str = Field(..., description='边终点标签')
+
+    # 当前边的关系类型，例如 handle_route、delegate_service。
+    relation_type: str | None = Field(default=None, description='边关系类型')
+
+
+class CodeRelationChain(BaseModel):
+    """表示一条结构化的代码关系链。"""
+
+    # 保留原有无类型字符串，便于兼容旧展示逻辑。
+    plain_text: str = Field(..., description='无类型关系链文本')
+
+    # 带关系类型的展示文本，例如 A -[call]-> B。
+    typed_text: str = Field(..., description='带关系类型的关系链文本')
+
+    # 当前链路包含的节点标签列表。
+    labels: list[str] = Field(default_factory=list, description='链路节点标签')
+
+    # 当前链路包含的结构化边列表。
+    edges: list[CodeRelationEdge] = Field(default_factory=list, description='链路边列表')
+
 
 class CodeInvestigationResult(BaseModel):
     """表示 code_agent 基于代码级摘要提炼出的实现线索。"""
@@ -159,6 +260,9 @@ class CodeInvestigationResult(BaseModel):
 
     # 从源码追踪步骤归纳出的代表性关系链，便于展示 route -> handler -> service 之类的路径。
     relation_chains: list[str] = Field(default_factory=list, description='代表性关系链')
+
+    # 带关系类型的结构化关系链，便于回答和 CLI 更精细展示。
+    relation_chain_details: list[CodeRelationChain] = Field(default_factory=list, description='结构化关系链')
 
     # 供 synthesis_agent 直接消费的实现说明列表。
     implementation_notes: list[str] = Field(default_factory=list, description='实现说明')
@@ -245,3 +349,6 @@ class CoordinatedAnswerResult(BaseModel):
         default_factory=dict,
         description='共享上下文',
     )
+
+
+AgentRunRecord.model_rebuild()

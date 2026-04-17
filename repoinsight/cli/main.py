@@ -5,6 +5,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich import print
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -19,6 +20,9 @@ from repoinsight.ingest.repo_cache import list_cloned_repos, remove_cloned_repo
 from repoinsight.llm.config import get_llm_config_help_text, get_llm_settings
 from repoinsight.llm.context_builder import remove_llm_context_text, save_llm_context_text
 from repoinsight.agents.models import (
+    AgentEvidenceItem,
+    AgentRunRecord,
+    AgentStructuredOutput,
     AnswerVerificationResult,
     CodeInvestigationResult,
     CoordinatedAnalysisResult,
@@ -102,6 +106,8 @@ def analyze(
     _render_key_file_summary(result)
     print(f'[bold]编排器[/bold]：{normalized_orchestrator}')
     _render_analysis_agent_trace(coordinated)
+    _render_analysis_agent_highlights(coordinated)
+    _render_analysis_verification(coordinated)
 
     if save_report:
         try:
@@ -684,12 +690,12 @@ def _render_analysis_agent_trace(result: CoordinatedAnalysisResult) -> None:
 
     for record in result.agent_trace:
         stage_text = ', '.join(record.completed_stage_names or record.stage_names) or '无'
-        detail_text = record.detail or record.error_message or '无'
+        detail_text = escape(_format_agent_record_detail(record))
         duration_text = f'{record.duration_ms} ms' if record.duration_ms is not None else '未知'
         attempt_text = str(record.attempt_count)
         if record.used_retry:
             attempt_text += ' (重试)'
-        table.add_row(record.display_name, record.status, attempt_text, duration_text, stage_text, detail_text)
+        table.add_row(record.display_name, record.status, attempt_text, duration_text, escape(stage_text), detail_text)
 
     print(table)
     if result.shared_context:
@@ -698,6 +704,128 @@ def _render_analysis_agent_trace(result: CoordinatedAnalysisResult) -> None:
             for key, value in result.shared_context.items()
         ]
         print(Panel('\n'.join(context_lines), title='[bold green]分析共享上下文', border_style='yellow'))
+
+
+def _render_analysis_agent_highlights(result: CoordinatedAnalysisResult) -> None:
+    """输出 analyze 侧几个核心 Agent 的摘要面板。"""
+    _render_analysis_agent_highlight_panel(
+        result,
+        role='planner_agent',
+        title='[bold green]任务规划',
+        border_style='white',
+    )
+    _render_analysis_agent_highlight_panel(
+        result,
+        role='repo_agent',
+        title='[bold green]仓库摘要',
+        border_style='green',
+    )
+    _render_analysis_agent_highlight_panel(
+        result,
+        role='readme_agent',
+        title='[bold green]README 摘要',
+        border_style='yellow',
+    )
+    _render_analysis_agent_highlight_panel(
+        result,
+        role='codebase_agent',
+        title='[bold green]代码库摘要',
+        border_style='cyan',
+    )
+    _render_analysis_agent_highlight_panel(
+        result,
+        role='profile_agent',
+        title='[bold green]技术栈摘要',
+        border_style='blue',
+    )
+    _render_analysis_agent_highlight_panel(
+        result,
+        role='insight_agent',
+        title='[bold green]洞察摘要',
+        border_style='magenta',
+    )
+
+
+def _render_analysis_agent_highlight_panel(
+    result: CoordinatedAnalysisResult,
+    *,
+    role: str,
+    title: str,
+    border_style: str,
+) -> None:
+    """把指定分析 Agent 的结构化产物渲染成更易读的摘要面板。"""
+    record = _find_agent_record(result.agent_trace, role)
+    if record is None or record.structured_output is None:
+        return
+
+    structured = record.structured_output
+    lines: list[str] = []
+    if structured.conclusions:
+        lines.append('[b cyan]核心结论:[/]')
+        for item in structured.conclusions[:3]:
+            lines.append(f'- {escape(item)}')
+    if structured.evidence:
+        if lines:
+            lines.append('')
+        lines.append('[b cyan]关键证据:[/]')
+        for item in _format_agent_evidence_labels(structured.evidence[:4]):
+            lines.append(f'- {escape(item)}')
+    if structured.next_actions:
+        if lines:
+            lines.append('')
+        lines.append('[b cyan]后续动作:[/]')
+        for item in structured.next_actions[:2]:
+            lines.append(f'- {escape(item)}')
+    if structured.metadata:
+        if lines:
+            lines.append('')
+        lines.append(f"[b cyan]元数据:[/] {escape(_format_agent_metadata(structured.metadata))}")
+    if not lines:
+        return
+    print(Panel('\n'.join(lines), title=title, border_style=border_style))
+
+
+def _render_analysis_verification(result: CoordinatedAnalysisResult) -> None:
+    """输出 analyze 侧 verifier_agent 的完整性检查结果。"""
+    verification_record = _find_agent_record(result.agent_trace, 'verifier_agent')
+    if verification_record is None or verification_record.structured_output is None:
+        return
+
+    structured = verification_record.structured_output
+    verdict = str(structured.metadata.get('verdict', verification_record.status))
+    issue_count = len(structured.uncertainties)
+    output = (
+        f"[b cyan]验证结论:[/] {escape(verdict)}\n"
+        f"[b cyan]待关注项数量:[/] {issue_count}\n"
+        f"[b cyan]主语言是否齐备:[/] {escape(_format_boolean_label(structured.metadata.get('has_primary_language')))}\n"
+        f"[b cyan]项目类型是否齐备:[/] {escape(_format_boolean_label(structured.metadata.get('has_project_type')))}"
+    )
+    print(Panel(output, title='[bold green]分析验证', border_style='green'))
+
+    if structured.uncertainties:
+        print(
+            Panel(
+                '\n'.join(f'- {escape(item)}' for item in structured.uncertainties),
+                title='[bold green]待关注项',
+                border_style='yellow',
+            )
+        )
+    if structured.evidence:
+        print(
+            Panel(
+                '\n'.join(f'- {escape(item)}' for item in _format_agent_evidence_labels(structured.evidence[:4])),
+                title='[bold green]关键证据',
+                border_style='blue',
+            )
+        )
+    if structured.next_actions:
+        print(
+            Panel(
+                '\n'.join(f'- {escape(item)}' for item in structured.next_actions[:3]),
+                title='[bold green]后续动作',
+                border_style='magenta',
+            )
+        )
 
 
 def _render_answer_agent_trace(result: CoordinatedAnswerResult) -> None:
@@ -715,12 +843,19 @@ def _render_answer_agent_trace(result: CoordinatedAnswerResult) -> None:
 
     for record in result.agent_trace:
         stage_text = ', '.join(record.completed_stage_names or record.stage_names) or '无'
-        detail_text = record.detail or record.error_message or '无'
+        detail_text = _format_agent_record_detail(record)
         duration_text = f'{record.duration_ms} ms' if record.duration_ms is not None else '未知'
         attempt_text = str(record.attempt_count)
         if record.used_retry:
             attempt_text += ' (重试)'
-        table.add_row(record.display_name, record.status, attempt_text, duration_text, stage_text, detail_text)
+        table.add_row(
+            record.display_name,
+            record.status,
+            attempt_text,
+            duration_text,
+            escape(stage_text),
+            escape(detail_text),
+        )
 
     print(table)
     if result.shared_context:
@@ -731,23 +866,92 @@ def _render_answer_agent_trace(result: CoordinatedAnswerResult) -> None:
         print(Panel('\n'.join(context_lines), title='[bold green]共享上下文', border_style='yellow'))
 
 
+def _format_agent_record_detail(record: AgentRunRecord) -> str:
+    """优先使用结构化产物格式化 Agent 轨迹说明，并兼容旧 detail 文本。"""
+    if record.structured_output is not None:
+        return _format_agent_structured_output(record.structured_output)
+    return record.detail or record.error_message or '无'
+
+
+def _find_agent_record(records: list[AgentRunRecord], role: str) -> AgentRunRecord | None:
+    """在 Agent 轨迹中按角色查找第一条记录。"""
+    for record in records:
+        if record.role == role:
+            return record
+    return None
+
+
+def _format_boolean_label(value: object) -> str:
+    """把布尔或缺省值转换成适合终端展示的文本。"""
+    if value is True:
+        return '是'
+    if value is False:
+        return '否'
+    return '未知'
+
+
+def _format_agent_structured_output(output: AgentStructuredOutput) -> str:
+    """把统一的 Agent 结构化输出压缩成适合 CLI 表格展示的文本。"""
+    lines: list[str] = []
+    if output.conclusions:
+        lines.append(f"结论：{_join_or_none(output.conclusions[:2])}")
+    if output.evidence:
+        lines.append(f"证据：{_join_or_none(_format_agent_evidence_labels(output.evidence[:3]))}")
+    if output.uncertainties:
+        lines.append(f"不确定：{_join_or_none(output.uncertainties[:2])}")
+    if output.next_actions:
+        lines.append(f"下一步：{_join_or_none(output.next_actions[:2])}")
+    if output.metadata:
+        lines.append(f"元数据：{_format_agent_metadata(output.metadata)}")
+    return '\n'.join(lines) if lines else '无'
+
+
+def _format_agent_evidence_labels(items: list[AgentEvidenceItem]) -> list[str]:
+    """提取适合在表格中展示的证据标签。"""
+    labels: list[str] = []
+    for item in items:
+        label = item.label.strip()
+        if item.location and item.location not in label:
+            label = f'{label} @ {item.location}'
+        elif item.source_path and item.source_path not in label:
+            label = f'{label} @ {item.source_path}'
+        labels.append(label)
+    return labels
+
+
+def _format_agent_metadata(metadata: dict[str, str | int | float | bool | list[str]]) -> str:
+    """把结构化元数据压缩成一行可读文本。"""
+    parts: list[str] = []
+    for key, value in metadata.items():
+        if isinstance(value, list):
+            value_text = _join_or_none([str(item) for item in value[:3]])
+        else:
+            value_text = str(value)
+        parts.append(f'{key}={value_text}')
+        if len(parts) >= 4:
+            break
+    return '；'.join(parts) if parts else '无'
+
+
 def _render_code_investigation(result: CodeInvestigationResult | None) -> None:
     """输出 code_agent 的代码调查结果。"""
     if result is None:
         return
 
     output = (
-        f"[b cyan]调查摘要:[/] {result.summary}\n"
+        f"[b cyan]调查摘要:[/] {escape(result.summary)}\n"
         f"[b cyan]置信度:[/] {result.confidence_level}\n"
         f"[b cyan]相关性评分:[/] {result.relevance_score:.2f}\n"
         f"[b cyan]缓存命中:[/] {'是' if result.cache_hit else '否'}\n"
         f"[b cyan]恢复扩检:[/] {'已提升' if result.recovery_improved else ('已尝试' if result.recovery_attempted else '未触发')}\n"
-        f"[b cyan]命中符号:[/] {_join_or_none(result.matched_symbols)}\n"
-        f"[b cyan]命中路由:[/] {_join_or_none(result.matched_routes)}\n"
-        f"[b cyan]源码路径:[/] {_join_or_none(result.source_paths)}\n"
-        f"[b cyan]关键位置:[/] {_join_or_none(result.evidence_locations)}\n"
-        f"[b cyan]下游调用:[/] {_join_or_none(result.called_symbols)}\n"
-        f"[b cyan]关系链:[/] {_join_or_none(result.relation_chains)}"
+        f"[b cyan]命中符号:[/] {escape(_join_or_none(result.matched_symbols))}\n"
+        f"[b cyan]命中路由:[/] {escape(_join_or_none(result.matched_routes))}\n"
+        f"[b cyan]源码路径:[/] {escape(_join_or_none(result.source_paths))}\n"
+        f"[b cyan]关键位置:[/] {escape(_join_or_none(result.evidence_locations))}\n"
+        f"[b cyan]下游调用:[/] {escape(_join_or_none(result.called_symbols))}\n"
+        f"[b cyan]关系类型:[/] {escape(_join_or_none(_collect_trace_relation_types(result.trace_steps)))}\n"
+        f"[b cyan]关系链:[/] {escape(_join_or_none(result.relation_chains))}\n"
+        f"[b cyan]类型化关系链:[/] {escape(_join_or_none([item.typed_text for item in result.relation_chain_details]))}"
     )
     print(Panel(output, title='[bold green]代码调查', border_style='blue'))
     if result.quality_notes:
@@ -763,6 +967,7 @@ def _render_code_investigation(result: CodeInvestigationResult | None) -> None:
         table = Table(title='源码追踪步骤', show_lines=False)
         table.add_column('深度', style='magenta', no_wrap=True)
         table.add_column('类型', style='cyan', no_wrap=True)
+        table.add_column('关系', style='magenta', no_wrap=True)
         table.add_column('标签', style='green')
         table.add_column('上游', style='blue')
         table.add_column('位置', style='yellow')
@@ -771,10 +976,11 @@ def _render_code_investigation(result: CodeInvestigationResult | None) -> None:
             table.add_row(
                 str(step.depth),
                 step.step_kind,
-                step.label,
-                step.parent_label or '入口',
-                step.location or step.source_path or '未知',
-                step.summary,
+                step.relation_type or ('入口' if step.parent_label is None else '未知'),
+                escape(step.label),
+                escape(step.parent_label or '入口'),
+                escape(step.location or step.source_path or '未知'),
+                escape(step.summary),
             )
         print(table)
 
@@ -787,6 +993,15 @@ def _render_code_investigation(result: CodeInvestigationResult | None) -> None:
                 border_style='magenta',
             )
         )
+
+
+def _collect_trace_relation_types(trace_steps: list[CodeTraceStep]) -> list[str]:
+    """汇总源码追踪中的关系类型，便于 CLI 面板快速查看。"""
+    relation_types: list[str] = []
+    for step in trace_steps:
+        if step.relation_type:
+            relation_types.append(step.relation_type)
+    return _unique_keep_order(relation_types)
 
 
 def _render_answer_verification(result: AnswerVerificationResult | None) -> None:
@@ -848,6 +1063,19 @@ def _format_size(size_bytes: int | None) -> str:
 def _join_or_none(items: list[str]) -> str:
     """把列表拼接成更适合终端展示的文本。"""
     return ', '.join(items) if items else '无'
+
+
+def _unique_keep_order(items: list[str]) -> list[str]:
+    """稳定去重，避免 CLI 面板里重复展示同类关系。"""
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def _apply_embedding_mode(embedding_mode: str) -> bool:

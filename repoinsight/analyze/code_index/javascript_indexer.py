@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from repoinsight.analyze.code_semantics import normalize_javascript_call_target
 from repoinsight.analyze.code_index.common import (
     _CodeIndexAccumulator,
     _build_api_route_summary_text,
@@ -277,7 +278,7 @@ def _extract_javascript_index_with_tree_sitter(
         if function_node is None:
             continue
 
-        callee_text = get_node_text(function_node, document.source_bytes).replace('?.', '.').strip()
+        callee_text = normalize_javascript_call_target(get_node_text(function_node, document.source_bytes))
         if callee_text == 'require':
             arguments_node = node.child_by_field_name('arguments')
             if arguments_node is None or not arguments_node.named_children:
@@ -521,7 +522,9 @@ def _collect_javascript_call_targets_from_node(node, source_bytes: bytes) -> lis
         if current.type == 'call_expression':
             function_node = current.child_by_field_name('function')
             if function_node is not None:
-                call_targets.append(get_node_text(function_node, source_bytes).replace('?.', '.').strip())
+                normalized_target = normalize_javascript_call_target(get_node_text(function_node, source_bytes))
+                if normalized_target:
+                    call_targets.append(normalized_target)
         for child in getattr(current, 'named_children', []):
             _visit(child)
 
@@ -659,7 +662,7 @@ def _resolve_js_route_handler(
         inline_name = f'inline_handler@L{line_number}'
         return inline_name, inline_name, _extract_javascript_called_symbols(handler_expression)
 
-    normalized = candidate.rstrip(')').replace('?.', '.').strip()
+    normalized = normalize_javascript_call_target(candidate.rstrip(')').strip())
     handler_name = normalized.split('.')[-1]
     summary = function_lookup.get(normalized) or function_lookup.get(handler_name)
     if summary is not None:
@@ -704,9 +707,10 @@ def _extract_javascript_called_symbols(body: str) -> list[str]:
     calls: list[str] = []
     pattern = re.compile(r'([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(')
     for match in pattern.finditer(body):
-        callee = match.group(1)
+        callee = normalize_javascript_call_target(match.group(1))
         if callee in keywords:
             continue
-        calls.append(callee)
+        if callee:
+            calls.append(callee)
     return _deduplicate_keep_order(calls)[:12]
 

@@ -57,12 +57,14 @@ INTENT_DOC_TYPE_MULTIPLIERS = {
     },
     'env': {
         'config_summary': 1.70,
+        'config_chunk': 1.62,
         'key_file_summary': 1.18,
         'entrypoint_summary': 1.08,
         'repo_summary': 0.88,
     },
     'config': {
         'config_summary': 1.55,
+        'config_chunk': 1.48,
         'repo_fact': 1.18,
         'key_file_summary': 1.08,
         'entrypoint_summary': 1.04,
@@ -82,14 +84,18 @@ INTENT_DOC_TYPE_MULTIPLIERS = {
     },
     'api': {
         'api_route_summary': 1.95,
+        'route_handler_chunk': 2.08,
         'function_summary': 1.18,
+        'function_body_chunk': 1.26,
         'entrypoint_summary': 1.12,
         'key_file_summary': 1.10,
         'subproject_summary': 1.04,
     },
     'implementation': {
         'function_summary': 1.85,
+        'function_body_chunk': 2.00,
         'class_summary': 1.55,
+        'class_body_chunk': 1.72,
         'key_file_summary': 1.18,
         'entrypoint_summary': 1.08,
         'subproject_summary': 1.05,
@@ -500,7 +506,13 @@ def _score_intent_specific_precision(
             'called_symbols': 2.8,
             'source_path': 2.6,
         }
-        preferred_doc_types = {'function_summary': 1.5, 'class_summary': 1.2, 'key_file_summary': 0.8}
+        preferred_doc_types = {
+            'function_body_chunk': 1.9,
+            'class_body_chunk': 1.6,
+            'function_summary': 1.5,
+            'class_summary': 1.2,
+            'key_file_summary': 0.8,
+        }
     elif query_intent == 'api':
         field_weights = {
             'route_path': 5.2,
@@ -511,7 +523,13 @@ def _score_intent_specific_precision(
             'called_symbols': 2.6,
             'source_path': 2.4,
         }
-        preferred_doc_types = {'api_route_summary': 1.6, 'function_summary': 0.9, 'entrypoint_summary': 0.8}
+        preferred_doc_types = {
+            'route_handler_chunk': 2.0,
+            'api_route_summary': 1.6,
+            'function_body_chunk': 1.1,
+            'function_summary': 0.9,
+            'entrypoint_summary': 0.8,
+        }
     else:
         return 0.0
 
@@ -524,6 +542,23 @@ def _score_intent_specific_precision(
             if any(term == value or term in value for value in values):
                 score += weight
                 break
+
+    if query_intent == 'implementation' and document.doc_type in {'function_body_chunk', 'class_body_chunk'}:
+        target_fields = ('qualified_name', 'symbol_name', 'code_entity_refs', 'code_entity_names')
+        if any(
+            any(term == value or term in value for value in (item.lower() for item in _metadata_values(document.metadata, field_name)))
+            for field_name in target_fields
+            for term in exact_terms
+        ):
+            score += 5.0
+    if query_intent == 'api' and document.doc_type == 'route_handler_chunk':
+        target_fields = ('route_path', 'handler_qualified_name', 'handler_name', 'code_entity_refs', 'code_entity_names')
+        if any(
+            any(term == value or term in value for value in (item.lower() for item in _metadata_values(document.metadata, field_name)))
+            for field_name in target_fields
+            for term in exact_terms
+        ):
+            score += 5.0
 
     score += preferred_doc_types.get(document.doc_type, 0.0)
     return score
@@ -580,16 +615,24 @@ def _default_doc_type_multiplier(doc_type: str) -> float:
         return 1.12
     if doc_type == 'config_summary':
         return 1.16
+    if doc_type == 'config_chunk':
+        return 1.17
     if doc_type == 'entrypoint_summary':
         return 1.16
     if doc_type == 'subproject_summary':
         return 1.10
     if doc_type == 'function_summary':
         return 1.18
+    if doc_type == 'function_body_chunk':
+        return 1.24
     if doc_type == 'api_route_summary':
         return 1.20
+    if doc_type == 'route_handler_chunk':
+        return 1.25
     if doc_type == 'class_summary':
         return 1.12
+    if doc_type == 'class_body_chunk':
+        return 1.18
     return 1.0
 
 
@@ -605,6 +648,10 @@ def _infer_query_intent(query: str) -> str:
         return 'api'
     if re.search(r'/[a-z0-9_\-/{}/:]+', lowered) and any(token in lowered for token in ('接口', '路由', 'api', 'endpoint')):
         return 'api'
+    if re.search(r'[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*', lowered) and any(
+        token in lowered for token in ('实现', 'logic', 'method', 'function', '源码', '代码')
+    ):
+        return 'implementation'
     for intent, keywords in QUERY_INTENT_KEYWORDS.items():
         if any(keyword in lowered for keyword in keywords):
             return intent

@@ -104,6 +104,80 @@ def build_mvp_rag_eval_cases(repo_id: str) -> list[RagEvaluationCase]:
     ]
 
 
+def build_code_rag_eval_cases(repo_id: str) -> list[RagEvaluationCase]:
+    """生成一组面向代码级问答的检索验证问题。"""
+    return [
+        RagEvaluationCase(
+            case_id='implementation-handle-login',
+            query='AuthService.handle_login 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['function_body_chunk', 'function_summary'],
+            expected_terms_any=['create_session_token'],
+        ),
+        RagEvaluationCase(
+            case_id='api-post-login',
+            query='POST /login 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['route_handler_chunk', 'api_route_summary'],
+            expected_terms_any=['handle_login'],
+        ),
+        RagEvaluationCase(
+            case_id='api-post-session',
+            query='POST /session 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['route_handler_chunk', 'function_body_chunk', 'api_route_summary'],
+            expected_terms_any=['auth_service.login_user', 'session_repo.persist_session'],
+            top_k=6,
+        ),
+    ]
+
+
+def build_full_rag_eval_cases(repo_id: str) -> list[RagEvaluationCase]:
+    """生成覆盖通用问题与代码级问题的完整评测集合。"""
+    return [
+        *build_mvp_rag_eval_cases(repo_id),
+        *build_code_rag_eval_cases(repo_id),
+    ]
+
+
+def build_multilang_code_rag_eval_cases(repo_id: str) -> list[RagEvaluationCase]:
+    """生成覆盖 TypeScript、Go、Rust 的多语言代码级检索评测集合。"""
+    return [
+        RagEvaluationCase(
+            case_id='ts-implementation-create-session',
+            query='createSession 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['function_body_chunk', 'function_summary'],
+            expected_source_paths=['src/routes.ts'],
+            expected_terms_any=['sessionService.create'],
+        ),
+        RagEvaluationCase(
+            case_id='ts-api-post-session',
+            query='POST /session 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['route_handler_chunk', 'api_route_summary'],
+            expected_source_paths=['src/routes.ts'],
+            expected_terms_any=['createSession'],
+        ),
+        RagEvaluationCase(
+            case_id='go-implementation-build-login-token',
+            query='BuildLoginToken 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['function_body_chunk', 'function_summary'],
+            expected_source_paths=['cmd/server/main.go'],
+            expected_terms_any=['signToken'],
+        ),
+        RagEvaluationCase(
+            case_id='rust-implementation-persist-session',
+            query='persist_session 是怎么实现的？',
+            expected_repo_id=repo_id,
+            expected_doc_types=['function_body_chunk', 'function_summary'],
+            expected_source_paths=['src/lib.rs'],
+            expected_terms_any=['write_store'],
+        ),
+    ]
+
+
 def evaluate_search_cases(
     cases: list[RagEvaluationCase],
     target_dir: str = DEFAULT_KNOWLEDGE_DIR,

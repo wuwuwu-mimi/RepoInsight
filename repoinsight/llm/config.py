@@ -43,7 +43,6 @@ def get_llm_settings() -> LlmSettings | None:
     provider = (_get_first_env('REPOINSIGHT_LLM_PROVIDER', 'OPENAI_PROVIDER') or '').strip().lower()
     model = _get_first_env('REPOINSIGHT_LLM_MODEL', 'OPENAI_MODEL')
     base_url = _get_first_env('REPOINSIGHT_LLM_BASE_URL', 'OPENAI_BASE_URL')
-    api_key = _get_first_env('REPOINSIGHT_LLM_API_KEY', 'OPENAI_API_KEY')
 
     if not model or not base_url:
         return None
@@ -53,8 +52,14 @@ def get_llm_settings() -> LlmSettings | None:
 
     normalized_provider = provider if provider in {'openai', 'ollama'} else 'openai'
 
-    if normalized_provider != 'ollama' and not api_key:
-        return None
+    # Ollama 本地模型允许不配置真实密钥，这里统一回退为固定占位值，
+    # 避免误用项目里已有的 OpenAI 密钥配置。
+    if normalized_provider == 'ollama':
+        api_key = 'ollama'
+    else:
+        api_key = _get_first_env('REPOINSIGHT_LLM_API_KEY', 'OPENAI_API_KEY')
+        if not api_key:
+            return None
 
     timeout_seconds = _get_float_env(
         primary_key='REPOINSIGHT_LLM_TIMEOUT',
@@ -71,7 +76,7 @@ def get_llm_settings() -> LlmSettings | None:
         provider=normalized_provider,
         model=model.strip(),
         base_url=base_url.strip().rstrip('/'),
-        api_key=api_key.strip() if api_key else 'ollama',
+        api_key=api_key.strip(),
         timeout_seconds=timeout_seconds,
         temperature=temperature,
     )
